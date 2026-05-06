@@ -495,6 +495,10 @@ func (c *AeronCluster) pollConnected() int {
 			ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			log.Printf("aergo: received challenge (correlationId=%d)", ch.CorrelationId)
 			c.handleChallenge(&ch)
+
+		default:
+			// Pass unrecognized messages (e.g. Hydra-framed responses) as raw bytes.
+			c.cfg.Listener.OnMessage(c, 0, buffer, 0, len(buffer))
 		}
 
 		workCount++
