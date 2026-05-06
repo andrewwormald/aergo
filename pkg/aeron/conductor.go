@@ -49,12 +49,13 @@ type subscriptionState struct {
 
 // Image represents a subscription's connection to a publication.
 type Image struct {
-	SessionID       int32
-	CorrelationID   int64
-	LogBuffers      *LogBuffers
-	SubscriberPos   int32 // counter ID for position tracking
-	JoinPosition    int64
-	SourceIdentity  string
+	SessionID          int32
+	CorrelationID      int64
+	LogBuffers         *LogBuffers
+	SubscriberPos      int32 // counter ID for position tracking
+	JoinPosition       int64
+	SourceIdentity     string
+	subscriberPosition int64 // current read position (internal)
 }
 
 // Context holds configuration for the client conductor.

@@ -11,12 +11,13 @@ type Header struct {
 	TermID        int32
 	TermOffset    int32
 	ReservedValue int64
+	Position      int64
 }
 
-// FragmentHandler is the callback for received message fragments.
+// FragmentHandler is called for each received message fragment.
 type FragmentHandler func(buffer []byte, header *Header)
 
-// Subscription wraps images for receiving messages from a stream.
+// Subscription receives messages from one or more publications via images.
 type Subscription struct {
 	conductor      *Conductor
 	channel        string
@@ -25,7 +26,6 @@ type Subscription struct {
 	closed         atomic.Bool
 }
 
-// newSubscription creates a subscription from a ready subscriptionState.
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
 	return &Subscription{
 		conductor:      conductor,
@@ -47,36 +47,39 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		return 0
 	}
 
-	totalFragments := 0
-
 	s.conductor.mu.Lock()
 	images := make([]*Image, len(state.images))
 	copy(images, state.images)
 	s.conductor.mu.Unlock()
 
+	totalFragments := 0
+
 	for _, img := range images {
 		if img.LogBuffers == nil {
 			continue
 		}
-
 		remaining := fragmentLimit - totalFragments
 		if remaining <= 0 {
 			break
 		}
 
-		// Determine which term and offset to read from
-		activeCount := img.LogBuffers.ActiveTermCount()
-		partIndex := int(activeCount % PartitionCount)
+		termLen := img.LogBuffers.TermLength()
+		shift := numberOfTrailingZeros(uint32(termLen))
+		initialTermID := img.LogBuffers.InitialTermID()
+
+		position := img.subscriberPosition
+		termID := initialTermID + int32(position>>shift)
+		termOffset := int32(position) & (termLen - 1)
+		partIndex := int((termID - initialTermID) % PartitionCount)
 		term := img.LogBuffers.Term(partIndex)
 
-		// Read subscriber position from counter
-		_, termOffset := img.LogBuffers.TermTailCounter(partIndex)
-		// Start reading from position 0 or tracked position
-		// (simplified -- production would track per-image position)
-
-		fragments, _ := ReadTerm(term, 0, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
+		fragments, newOffset := ReadTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
 			payload := make([]byte, length)
 			buf.GetBytes(offset, payload)
+
+			alignedFrame := align(hdr.FrameLength, DataFrameHeaderLen)
+			pos := computePosition(hdr.TermID, hdr.TermOffset+alignedFrame, termLen, initialTermID)
+
 			h := &Header{
 				FrameLength:   hdr.FrameLength,
 				Flags:         hdr.Flags,
@@ -85,12 +88,16 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 				TermID:        hdr.TermID,
 				TermOffset:    hdr.TermOffset,
 				ReservedValue: hdr.ReservedValue,
+				Position:      pos,
 			}
 			handler(payload, h)
 		}, remaining)
 
+		if fragments > 0 {
+			img.subscriberPosition = computePosition(termID, newOffset, termLen, initialTermID)
+		}
+
 		totalFragments += fragments
-		_ = termOffset
 	}
 
 	return totalFragments
