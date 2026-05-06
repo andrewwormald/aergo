@@ -12,6 +12,7 @@ bin/
 .DS_Store
 
 # Runtime data
+cluster-data/
 hydra-data/
 
 # Go

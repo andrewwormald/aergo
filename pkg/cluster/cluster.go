@@ -497,7 +497,7 @@ func (c *AeronCluster) pollConnected() int {
 			c.handleChallenge(&ch)
 
 		default:
-			// Pass unrecognized messages (e.g. Hydra-framed responses) as raw bytes.
+			// Pass messages with unrecognized template IDs as raw bytes.
 			c.cfg.Listener.OnMessage(c, 0, buffer, 0, len(buffer))
 		}
 
