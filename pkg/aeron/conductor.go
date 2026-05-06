@@ -1,4 +1,4 @@
-package native
+package aeron
 
 import (
 	"encoding/binary"

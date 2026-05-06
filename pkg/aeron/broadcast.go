@@ -1,4 +1,4 @@
-package native
+package aeron
 
 // Broadcast buffer trailer layout (single-producer to multiple-consumers).
 const (

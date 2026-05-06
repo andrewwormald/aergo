@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	aeron "github.com/andrewwormald/aergo/pkg/aeron/native"
+	aeron "github.com/andrewwormald/aergo/pkg/aeron"
 	aeroncluster "github.com/andrewwormald/aergo/pkg/cluster"
 	"github.com/andrewwormald/aergo/pkg/codec/cluster"
 )

@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"time"
 
-	aeron "github.com/andrewwormald/aergo/pkg/aeron/native"
+	aeron "github.com/andrewwormald/aergo/pkg/aeron"
 	"github.com/andrewwormald/aergo/pkg/codec/cluster"
 	"github.com/andrewwormald/aergo/pkg/codec/sbe"
 )

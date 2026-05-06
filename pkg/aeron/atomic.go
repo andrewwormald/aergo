@@ -4,7 +4,7 @@
 // It communicates with the Aeron media driver (aeronmd) via memory-mapped
 // files: the CnC file for commands/responses and log buffer files for
 // publication/subscription data.
-package native
+package aeron
 
 import (
 	"sync/atomic"
