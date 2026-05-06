@@ -6,18 +6,16 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/andrewwormald/aergo/pkg/aeron/client"
+	aeron "github.com/andrewwormald/aergo/pkg/aeron/native"
 	"github.com/andrewwormald/aergo/pkg/codec/cluster"
 	"github.com/andrewwormald/aergo/pkg/codec/sbe"
 )
 
 // Cluster is the interface for sending and receiving messages on an Aeron cluster.
-// Consumers should depend on this interface rather than the concrete AeronCluster type.
 type Cluster interface {
 	Connect()
 	Poll() int
 	Offer(buf []byte) int64
-	OfferWithBackpressure(buf []byte, strategy client.BackpressureStrategy, maxRetries int) int64
 	State() State
 	GracefulClose()
 	Close() error
@@ -38,53 +36,43 @@ const (
 	StateSendConnectRequest
 	StateAwaitConnectReply
 	StateConnected
-	StateClosing // graceful close in progress
+	StateClosing
 	StateClosed
 )
 
-// Default Aeron cluster stream IDs.
 const (
-	DefaultIngressStreamId = 101
-	DefaultEgressStreamId  = 102
+	DefaultIngressStreamId     = 101
+	DefaultEgressStreamId      = 102
+	DefaultEgressChannel       = "aeron:udp?endpoint=localhost:19876"
+	DefaultKeepAliveIntervalMs = 1000
+	DefaultConnectTimeoutMs    = 5000
+	DefaultReconnectBackoffMs  = 1000
+	DefaultMaxReconnectBackMs  = 30000
 )
 
-const DefaultEgressChannel = "aeron:udp?endpoint=localhost:19876"
-const DefaultKeepAliveIntervalMs = 1000
-const DefaultConnectTimeoutMs = 5000
-const DefaultReconnectBackoffMs = 1000
-const DefaultMaxReconnectBackoffMs = 30000
-
-// ClusterMember represents an Aeron cluster member endpoint.
 type ClusterMember struct {
 	MemberId int32
 	Endpoint string
 }
 
-// Config holds cluster client configuration.
 type Config struct {
-	IngressChannel  string
-	IngressStreamId int32
-	EgressChannel   string
-	EgressStreamId  int32
-	Members         []ClusterMember
-	Listener        EgressListener
-	AeronDir        string
-
-	KeepAliveIntervalMs    int64
-	ConnectTimeoutMs       int64
-	ReconnectBackoffMs     int64
-	MaxReconnectBackoffMs  int64
-	MaxReconnectAttempts   int // 0 = unlimited
-	AutoReconnect          bool
-
-	// SendBufSize is the size of the reusable send buffer.
-	SendBufSize int
-
-	// LockOSThread pins the poll loop to an OS thread.
-	LockOSThread bool
+	IngressChannel        string
+	IngressStreamId       int32
+	EgressChannel         string
+	EgressStreamId        int32
+	Members               []ClusterMember
+	Listener              EgressListener
+	AeronDir              string
+	KeepAliveIntervalMs   int64
+	ConnectTimeoutMs      int64
+	ReconnectBackoffMs    int64
+	MaxReconnectBackoffMs int64
+	MaxReconnectAttempts  int
+	AutoReconnect         bool
+	SendBufSize           int
+	LockOSThread          bool
 }
 
-// DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
 		IngressStreamId:       DefaultIngressStreamId,
@@ -94,65 +82,38 @@ func DefaultConfig() Config {
 		KeepAliveIntervalMs:   DefaultKeepAliveIntervalMs,
 		ConnectTimeoutMs:      DefaultConnectTimeoutMs,
 		ReconnectBackoffMs:    DefaultReconnectBackoffMs,
-		MaxReconnectBackoffMs: DefaultMaxReconnectBackoffMs,
+		MaxReconnectBackoffMs: DefaultMaxReconnectBackMs,
 		AutoReconnect:         true,
 		SendBufSize:           4096,
 		LockOSThread:          true,
 	}
 }
 
-// Compile-time check that AeronCluster implements Cluster.
 var _ Cluster = (*AeronCluster)(nil)
 
-// AeronCluster is the main cluster client.
 type AeronCluster struct {
 	cfg Config
 
-	aeronClient *client.Client
+	aeronClient *aeron.Aeron
+	egressSub   *aeron.Subscription
+	ingressPubs []*aeron.Publication
 
-	// Egress subscription (cluster -> client)
-	egressSub *client.Subscription
-
-	// Ingress publications (client -> cluster), one per member
-	ingressPubs []*client.Publication
-
-	// Current leader
 	leaderMemberId   int32
 	leadershipTermId int64
 	clusterSessionId int64
-
-	// Correlation tracking
-	correlationId int64
-
-	// State machine
-	state State
-
-	// Keepalive
-	lastKeepAliveMs int64
-
-	// Send buffer (reusable, pre-allocated)
-	sendBuf *client.BufferPool
-
-	// Connect timing
-	connectStartMs int64
-
-	// Reconnection
+	correlationId    int64
+	state            State
+	lastKeepAliveMs  int64
+	sendBuf          []byte
+	connectStartMs   int64
 	reconnectAttempts int
 	reconnectBackoff  int64
 	lastReconnectMs   int64
-
-	// Thread pinning
-	osThreadLocked bool
+	osThreadLocked    bool
 }
 
-// New creates a new cluster client.
 func New(cfg Config) (*AeronCluster, error) {
-	opts := []client.Option{}
-	if cfg.AeronDir != "" {
-		opts = append(opts, client.WithDir(cfg.AeronDir))
-	}
-
-	ac, err := client.New(opts...)
+	ac, err := aeron.Connect(aeron.WithDir(cfg.AeronDir))
 	if err != nil {
 		return nil, fmt.Errorf("create aeron client: %w", err)
 	}
@@ -166,105 +127,67 @@ func New(cfg Config) (*AeronCluster, error) {
 		cfg:              cfg,
 		aeronClient:      ac,
 		state:            StateDisconnected,
-		sendBuf:          client.NewBufferPool(4, bufSize),
+		sendBuf:          make([]byte, bufSize),
 		reconnectBackoff: cfg.ReconnectBackoffMs,
 	}, nil
 }
 
-// Connect initiates the cluster connection. Call Poll() in a loop after this.
 func (c *AeronCluster) Connect() {
 	c.state = StateCreateEgressSubscription
 	c.connectStartMs = time.Now().UnixMilli()
 }
 
-// Poll drives the cluster client state machine. Returns work count.
-// Should be called from a single goroutine. Use Config.LockOSThread=true
-// to pin to an OS thread (recommended for latency).
 func (c *AeronCluster) Poll() int {
 	if c.cfg.LockOSThread && !c.osThreadLocked {
 		runtime.LockOSThread()
 		c.osThreadLocked = true
 	}
 
-	workCount := 0
+	// Process driver responses
+	c.aeronClient.DoWork()
 
 	switch c.state {
 	case StateDisconnected:
-		workCount += c.tryReconnect()
+		return c.tryReconnect()
 	case StateCreateEgressSubscription:
-		workCount += c.createEgressSubscription()
+		return c.createEgressSubscription()
 	case StateAwaitSubscriptionConnected:
-		workCount += c.awaitSubscriptionConnected()
+		return c.awaitSubscriptionConnected()
 	case StateCreateIngressPublications:
-		workCount += c.createIngressPublications()
+		return c.createIngressPublications()
 	case StateAwaitPublicationConnected:
-		workCount += c.awaitPublicationConnected()
+		return c.awaitPublicationConnected()
 	case StateSendConnectRequest:
-		workCount += c.sendConnectRequest()
+		return c.sendConnectRequest()
 	case StateAwaitConnectReply:
-		workCount += c.awaitConnectReply()
+		return c.awaitConnectReply()
 	case StateConnected:
-		workCount += c.pollConnected()
+		return c.pollConnected()
 	case StateClosing:
-		workCount += c.pollClosing()
+		return c.pollClosing()
 	}
-
-	return workCount
+	return 0
 }
 
-// Offer sends an application message to the cluster leader.
-// Automatically prepends SessionMessageHeader.
 func (c *AeronCluster) Offer(buf []byte) int64 {
 	if c.state != StateConnected {
 		return -1
 	}
 
-	sendBuf := c.sendBuf.Get()
-
 	smh := cluster.SessionMessageHeader{
 		LeadershipTermId: c.leadershipTermId,
 		ClusterSessionId: c.clusterSessionId,
-		Timestamp:        0,
 	}
-	n := smh.Encode(sendBuf, 0)
-	copy(sendBuf[n:], buf)
-	totalLen := n + len(buf)
+	n := smh.Encode(c.sendBuf, 0)
+	copy(c.sendBuf[n:], buf)
 
-	leaderPub := c.leaderPublication()
-	if leaderPub == nil {
+	pub := c.leaderPublication()
+	if pub == nil {
 		return -1
 	}
-
-	return leaderPub.Offer(sendBuf[:totalLen])
+	return pub.Offer(c.sendBuf[:n+len(buf)])
 }
 
-// OfferWithBackpressure sends with configurable backpressure handling.
-func (c *AeronCluster) OfferWithBackpressure(buf []byte, strategy client.BackpressureStrategy, maxRetries int) int64 {
-	if c.state != StateConnected {
-		return -1
-	}
-
-	sendBuf := c.sendBuf.Get()
-
-	smh := cluster.SessionMessageHeader{
-		LeadershipTermId: c.leadershipTermId,
-		ClusterSessionId: c.clusterSessionId,
-		Timestamp:        0,
-	}
-	n := smh.Encode(sendBuf, 0)
-	copy(sendBuf[n:], buf)
-	totalLen := n + len(buf)
-
-	leaderPub := c.leaderPublication()
-	if leaderPub == nil {
-		return -1
-	}
-
-	return leaderPub.OfferWithBackpressure(sendBuf[:totalLen], strategy, maxRetries)
-}
-
-// GracefulClose initiates graceful shutdown by sending SessionCloseRequest.
-// Poll() must continue to be called until State() == StateClosed.
 func (c *AeronCluster) GracefulClose() {
 	if c.state == StateConnected {
 		c.sendCloseRequest()
@@ -274,49 +197,30 @@ func (c *AeronCluster) GracefulClose() {
 	}
 }
 
-// State returns the current connection state.
-func (c *AeronCluster) State() State {
-	return c.state
-}
+func (c *AeronCluster) State() State              { return c.state }
+func (c *AeronCluster) LeaderMemberId() int32     { return c.leaderMemberId }
+func (c *AeronCluster) ClusterSessionId() int64   { return c.clusterSessionId }
+func (c *AeronCluster) LeadershipTermId() int64   { return c.leadershipTermId }
 
-// LeaderMemberId returns the current leader member ID.
-func (c *AeronCluster) LeaderMemberId() int32 {
-	return c.leaderMemberId
-}
-
-// ClusterSessionId returns the established session ID.
-func (c *AeronCluster) ClusterSessionId() int64 {
-	return c.clusterSessionId
-}
-
-// LeadershipTermId returns the current leadership term ID.
-func (c *AeronCluster) LeadershipTermId() int64 {
-	return c.leadershipTermId
-}
-
-// Close immediately shuts down the cluster client.
 func (c *AeronCluster) Close() error {
 	c.state = StateClosed
-
 	if c.egressSub != nil {
 		c.egressSub.Close()
 	}
 	for _, pub := range c.ingressPubs {
 		pub.Close()
 	}
-
 	if c.osThreadLocked {
 		runtime.UnlockOSThread()
 		c.osThreadLocked = false
 	}
-
 	if c.aeronClient != nil {
 		return c.aeronClient.Close()
 	}
 	return nil
 }
 
-// -- State machine steps ---------------------------------------------------
+// --- State machine ---
 
 func (c *AeronCluster) createEgressSubscription() int {
 	sub, err := c.aeronClient.AddSubscription(c.cfg.EgressChannel, c.cfg.EgressStreamId)
@@ -330,20 +234,13 @@ func (c *AeronCluster) createEgressSubscription() int {
 }
 
 func (c *AeronCluster) awaitSubscriptionConnected() int {
-	if c.egressSub.IsConnected() || c.egressSub.ChannelStatus() > 0 {
-		c.state = StateCreateIngressPublications
-		return 1
-	}
-	if c.isConnectTimedOut() {
-		log.Printf("aergo: subscription connect timeout")
-		c.handleDisconnect("subscription connect timeout")
-		return 0
-	}
-	return 0
+	// With native client, subscription is ready when the conductor confirms it
+	c.state = StateCreateIngressPublications
+	return 1
 }
 
 func (c *AeronCluster) createIngressPublications() int {
-	c.ingressPubs = make([]*client.Publication, 0, len(c.cfg.Members))
+	c.ingressPubs = make([]*aeron.Publication, 0, len(c.cfg.Members))
 	for _, member := range c.cfg.Members {
 		uri := fmt.Sprintf("aeron:udp?endpoint=%s", member.Endpoint)
 		if c.cfg.IngressChannel != "" {
@@ -375,13 +272,12 @@ func (c *AeronCluster) awaitPublicationConnected() int {
 	if c.isConnectTimedOut() {
 		log.Printf("aergo: publication connect timeout")
 		c.handleDisconnect("publication connect timeout")
-		return 0
 	}
 	return 0
 }
 
 func (c *AeronCluster) sendConnectRequest() int {
-	c.correlationId = c.aeronClient.NextCorrelationId()
+	c.correlationId = time.Now().UnixNano()
 
 	req := cluster.SessionConnectRequest{
 		CorrelationId:    c.correlationId,
@@ -389,13 +285,11 @@ func (c *AeronCluster) sendConnectRequest() int {
 		Version:          int32(cluster.SchemaVersion),
 		ResponseChannel:  c.cfg.EgressChannel,
 	}
-
-	sendBuf := c.sendBuf.Get()
-	n := req.Encode(sendBuf, 0)
+	n := req.Encode(c.sendBuf, 0)
 
 	for _, pub := range c.ingressPubs {
 		if pub.IsConnected() {
-			result := pub.Offer(sendBuf[:n])
+			result := pub.Offer(c.sendBuf[:n])
 			if result > 0 {
 				c.state = StateAwaitConnectReply
 				return 1
@@ -407,20 +301,16 @@ func (c *AeronCluster) sendConnectRequest() int {
 
 func (c *AeronCluster) awaitConnectReply() int {
 	workCount := 0
-
-	c.egressSub.Poll(func(buffer []byte, header *client.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
 		if len(buffer) < sbe.HeaderSize {
 			return
 		}
-
 		var hdr sbe.MessageHeader
 		hdr.Decode(buffer, 0)
 
-		switch hdr.TemplateId {
-		case cluster.TemplateIdSessionEvent:
+		if hdr.TemplateId == cluster.TemplateIdSessionEvent {
 			var evt cluster.SessionEvent
 			evt.DecodeWithBlockLength(buffer, sbe.HeaderSize, int(hdr.BlockLength))
-
 			if evt.CorrelationId == c.correlationId {
 				if evt.Code == cluster.EventCodeOK {
 					c.clusterSessionId = evt.ClusterSessionId
@@ -447,21 +337,17 @@ func (c *AeronCluster) awaitConnectReply() int {
 		log.Printf("aergo: connect reply timeout")
 		c.handleDisconnect("connect reply timeout")
 	}
-
 	return workCount
 }
 
 func (c *AeronCluster) pollConnected() int {
 	workCount := 0
-
-	c.egressSub.Poll(func(buffer []byte, header *client.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
 		if len(buffer) < sbe.HeaderSize {
 			return
 		}
-
 		var hdr sbe.MessageHeader
 		hdr.Decode(buffer, 0)
-
 		bodyOffset := sbe.HeaderSize
 
 		switch hdr.TemplateId {
@@ -476,7 +362,6 @@ func (c *AeronCluster) pollConnected() int {
 			var evt cluster.SessionEvent
 			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			c.cfg.Listener.OnSessionEvent(c, &evt)
-
 			if evt.Code == cluster.EventCodeClosed {
 				log.Printf("aergo: session closed by cluster: %s", evt.Detail)
 				c.handleDisconnect("session closed by cluster")
@@ -497,34 +382,28 @@ func (c *AeronCluster) pollConnected() int {
 			c.handleChallenge(&ch)
 
 		default:
-			// Pass messages with unrecognized template IDs as raw bytes.
 			c.cfg.Listener.OnMessage(c, 0, buffer, 0, len(buffer))
 		}
-
 		workCount++
 	}, 10)
 
-	// Keepalive
 	nowMs := time.Now().UnixMilli()
 	if nowMs-c.lastKeepAliveMs >= c.cfg.KeepAliveIntervalMs {
 		c.sendKeepAlive()
 		c.lastKeepAliveMs = nowMs
 		workCount++
 	}
-
 	return workCount
 }
 
 func (c *AeronCluster) pollClosing() int {
-	// Poll for close acknowledgment from cluster
 	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *client.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
 		if len(buffer) < sbe.HeaderSize {
 			return
 		}
 		var hdr sbe.MessageHeader
 		hdr.Decode(buffer, 0)
-
 		if hdr.TemplateId == cluster.TemplateIdSessionEvent {
 			var evt cluster.SessionEvent
 			evt.DecodeWithBlockLength(buffer, sbe.HeaderSize, int(hdr.BlockLength))
@@ -534,29 +413,21 @@ func (c *AeronCluster) pollClosing() int {
 		}
 		workCount++
 	}, 10)
-
-	// Don't wait forever for ack
 	c.state = StateClosed
 	return workCount
 }
-
-// -- Graceful shutdown -----------------------------------------------------
 
 func (c *AeronCluster) sendCloseRequest() {
 	req := cluster.SessionCloseRequest{
 		ClusterSessionId: c.clusterSessionId,
 		LeadershipTermId: c.leadershipTermId,
 	}
-	sendBuf := c.sendBuf.Get()
-	n := req.Encode(sendBuf, 0)
-	pub := c.leaderPublication()
-	if pub != nil {
-		pub.Offer(sendBuf[:n])
+	n := req.Encode(c.sendBuf, 0)
+	if pub := c.leaderPublication(); pub != nil {
+		pub.Offer(c.sendBuf[:n])
 		log.Printf("aergo: sent close request for session=%d", c.clusterSessionId)
 	}
 }
-
-// -- Challenge-response authentication -------------------------------------
 
 func (c *AeronCluster) handleChallenge(ch *cluster.Challenge) {
 	responseData := c.cfg.Listener.OnChallenge(c, ch)
@@ -564,18 +435,14 @@ func (c *AeronCluster) handleChallenge(ch *cluster.Challenge) {
 		log.Printf("aergo: challenge rejected by listener (no response data)")
 		return
 	}
-
 	resp := cluster.ChallengeResponse{
 		CorrelationId:    ch.CorrelationId,
 		ClusterSessionId: ch.ClusterSessionId,
 		ChallengeData:    responseData,
 	}
-
-	sendBuf := c.sendBuf.Get()
-	n := resp.Encode(sendBuf, 0)
-	pub := c.leaderPublication()
-	if pub != nil {
-		result := pub.Offer(sendBuf[:n])
+	n := resp.Encode(c.sendBuf, 0)
+	if pub := c.leaderPublication(); pub != nil {
+		result := pub.Offer(c.sendBuf[:n])
 		if result > 0 {
 			log.Printf("aergo: sent challenge response (correlationId=%d)", ch.CorrelationId)
 		} else {
@@ -584,27 +451,19 @@ func (c *AeronCluster) handleChallenge(ch *cluster.Challenge) {
 	}
 }
 
-// -- Keepalive -------------------------------------------------------------
-
 func (c *AeronCluster) sendKeepAlive() {
 	ka := cluster.SessionKeepAlive{
 		LeadershipTermId: c.leadershipTermId,
 		ClusterSessionId: c.clusterSessionId,
 	}
-	sendBuf := c.sendBuf.Get()
-	n := ka.Encode(sendBuf, 0)
-	pub := c.leaderPublication()
-	if pub != nil {
-		pub.Offer(sendBuf[:n])
+	n := ka.Encode(c.sendBuf, 0)
+	if pub := c.leaderPublication(); pub != nil {
+		pub.Offer(c.sendBuf[:n])
 	}
 }
 
-// -- Reconnection ----------------------------------------------------------
-
 func (c *AeronCluster) handleDisconnect(reason string) {
 	log.Printf("aergo: disconnected: %s", reason)
-
-	// Clean up existing resources
 	if c.egressSub != nil {
 		c.egressSub.Close()
 		c.egressSub = nil
@@ -631,21 +490,16 @@ func (c *AeronCluster) tryReconnect() int {
 	if !c.cfg.AutoReconnect {
 		return 0
 	}
-
 	nowMs := time.Now().UnixMilli()
 	if nowMs-c.lastReconnectMs < c.reconnectBackoff {
 		return 0
 	}
-
 	c.reconnectAttempts++
 	log.Printf("aergo: reconnect attempt %d (backoff=%dms)", c.reconnectAttempts, c.reconnectBackoff)
-
-	// Exponential backoff with cap
 	c.reconnectBackoff = c.reconnectBackoff * 2
 	if c.reconnectBackoff > c.cfg.MaxReconnectBackoffMs {
 		c.reconnectBackoff = c.cfg.MaxReconnectBackoffMs
 	}
-
 	c.connectStartMs = time.Now().UnixMilli()
 	c.state = StateCreateEgressSubscription
 	return 1
@@ -655,9 +509,7 @@ func (c *AeronCluster) isConnectTimedOut() bool {
 	return time.Now().UnixMilli()-c.connectStartMs > c.cfg.ConnectTimeoutMs
 }
 
-// -- Leader publication selection ------------------------------------------
-
-func (c *AeronCluster) leaderPublication() *client.Publication {
+func (c *AeronCluster) leaderPublication() *aeron.Publication {
 	if len(c.ingressPubs) == 0 {
 		return nil
 	}
