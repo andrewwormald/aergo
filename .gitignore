@@ -13,7 +13,6 @@ bin/
 
 # Runtime data
 cluster-data/
-hydra-data/
 
 # Go
 *.exe
