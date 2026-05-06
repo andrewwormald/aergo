@@ -7,8 +7,6 @@ import (
 	"time"
 
 	aeron "github.com/andrewwormald/aergo/pkg/aeron"
-	"github.com/andrewwormald/aergo/pkg/codec/cluster"
-	"github.com/andrewwormald/aergo/pkg/codec/sbe"
 )
 
 // Cluster is the interface for sending and receiving messages on an Aeron cluster.
@@ -174,7 +172,7 @@ func (c *AeronCluster) Offer(buf []byte) int64 {
 		return -1
 	}
 
-	smh := cluster.SessionMessageHeader{
+	smh := SessionMessageHeader{
 		LeadershipTermId: c.leadershipTermId,
 		ClusterSessionId: c.clusterSessionId,
 	}
@@ -279,10 +277,10 @@ func (c *AeronCluster) awaitPublicationConnected() int {
 func (c *AeronCluster) sendConnectRequest() int {
 	c.correlationId = time.Now().UnixNano()
 
-	req := cluster.SessionConnectRequest{
+	req := SessionConnectRequest{
 		CorrelationId:    c.correlationId,
 		ResponseStreamId: c.cfg.EgressStreamId,
-		Version:          int32(cluster.SchemaVersion),
+		Version:          int32(SchemaVersion),
 		ResponseChannel:  c.cfg.EgressChannel,
 	}
 	n := req.Encode(c.sendBuf, 0)
@@ -302,17 +300,17 @@ func (c *AeronCluster) sendConnectRequest() int {
 func (c *AeronCluster) awaitConnectReply() int {
 	workCount := 0
 	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
-		if len(buffer) < sbe.HeaderSize {
+		if len(buffer) < HeaderSize {
 			return
 		}
-		var hdr sbe.MessageHeader
+		var hdr MessageHeader
 		hdr.Decode(buffer, 0)
 
-		if hdr.TemplateId == cluster.TemplateIdSessionEvent {
-			var evt cluster.SessionEvent
-			evt.DecodeWithBlockLength(buffer, sbe.HeaderSize, int(hdr.BlockLength))
+		if hdr.TemplateId == TemplateIdSessionEvent {
+			var evt SessionEvent
+			evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
 			if evt.CorrelationId == c.correlationId {
-				if evt.Code == cluster.EventCodeOK {
+				if evt.Code == EventCodeOK {
 					c.clusterSessionId = evt.ClusterSessionId
 					c.leaderMemberId = evt.LeaderMemberId
 					c.leadershipTermId = evt.LeadershipTermId
@@ -343,40 +341,40 @@ func (c *AeronCluster) awaitConnectReply() int {
 func (c *AeronCluster) pollConnected() int {
 	workCount := 0
 	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
-		if len(buffer) < sbe.HeaderSize {
+		if len(buffer) < HeaderSize {
 			return
 		}
-		var hdr sbe.MessageHeader
+		var hdr MessageHeader
 		hdr.Decode(buffer, 0)
-		bodyOffset := sbe.HeaderSize
+		bodyOffset := HeaderSize
 
 		switch hdr.TemplateId {
-		case cluster.TemplateIdSessionMessageHeader:
-			var smh cluster.SessionMessageHeader
+		case TemplateIdSessionMessageHeader:
+			var smh SessionMessageHeader
 			consumed := smh.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			payloadOffset := bodyOffset + consumed
 			payloadLen := len(buffer) - payloadOffset
 			c.cfg.Listener.OnMessage(c, smh.Timestamp, buffer, payloadOffset, payloadLen)
 
-		case cluster.TemplateIdSessionEvent:
-			var evt cluster.SessionEvent
+		case TemplateIdSessionEvent:
+			var evt SessionEvent
 			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			c.cfg.Listener.OnSessionEvent(c, &evt)
-			if evt.Code == cluster.EventCodeClosed {
+			if evt.Code == EventCodeClosed {
 				log.Printf("aergo: session closed by cluster: %s", evt.Detail)
 				c.handleDisconnect("session closed by cluster")
 			}
 
-		case cluster.TemplateIdNewLeaderEvent:
-			var evt cluster.NewLeaderEvent
+		case TemplateIdNewLeaderEvent:
+			var evt NewLeaderEvent
 			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			c.leaderMemberId = evt.LeaderMemberId
 			c.leadershipTermId = evt.LeadershipTermId
 			log.Printf("aergo: new leader: member=%d term=%d", evt.LeaderMemberId, evt.LeadershipTermId)
 			c.cfg.Listener.OnNewLeader(c, &evt)
 
-		case cluster.TemplateIdChallenge:
-			var ch cluster.Challenge
+		case TemplateIdChallenge:
+			var ch Challenge
 			ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			log.Printf("aergo: received challenge (correlationId=%d)", ch.CorrelationId)
 			c.handleChallenge(&ch)
@@ -399,15 +397,15 @@ func (c *AeronCluster) pollConnected() int {
 func (c *AeronCluster) pollClosing() int {
 	workCount := 0
 	c.egressSub.Poll(func(buffer []byte, header *aeron.Header) {
-		if len(buffer) < sbe.HeaderSize {
+		if len(buffer) < HeaderSize {
 			return
 		}
-		var hdr sbe.MessageHeader
+		var hdr MessageHeader
 		hdr.Decode(buffer, 0)
-		if hdr.TemplateId == cluster.TemplateIdSessionEvent {
-			var evt cluster.SessionEvent
-			evt.DecodeWithBlockLength(buffer, sbe.HeaderSize, int(hdr.BlockLength))
-			if evt.Code == cluster.EventCodeClosed {
+		if hdr.TemplateId == TemplateIdSessionEvent {
+			var evt SessionEvent
+			evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
+			if evt.Code == EventCodeClosed {
 				log.Printf("aergo: graceful close acknowledged")
 			}
 		}
@@ -418,7 +416,7 @@ func (c *AeronCluster) pollClosing() int {
 }
 
 func (c *AeronCluster) sendCloseRequest() {
-	req := cluster.SessionCloseRequest{
+	req := SessionCloseRequest{
 		ClusterSessionId: c.clusterSessionId,
 		LeadershipTermId: c.leadershipTermId,
 	}
@@ -429,13 +427,13 @@ func (c *AeronCluster) sendCloseRequest() {
 	}
 }
 
-func (c *AeronCluster) handleChallenge(ch *cluster.Challenge) {
+func (c *AeronCluster) handleChallenge(ch *Challenge) {
 	responseData := c.cfg.Listener.OnChallenge(c, ch)
 	if responseData == nil {
 		log.Printf("aergo: challenge rejected by listener (no response data)")
 		return
 	}
-	resp := cluster.ChallengeResponse{
+	resp := ChallengeResponse{
 		CorrelationId:    ch.CorrelationId,
 		ClusterSessionId: ch.ClusterSessionId,
 		ChallengeData:    responseData,
@@ -452,7 +450,7 @@ func (c *AeronCluster) handleChallenge(ch *cluster.Challenge) {
 }
 
 func (c *AeronCluster) sendKeepAlive() {
-	ka := cluster.SessionKeepAlive{
+	ka := SessionKeepAlive{
 		LeadershipTermId: c.leadershipTermId,
 		ClusterSessionId: c.clusterSessionId,
 	}

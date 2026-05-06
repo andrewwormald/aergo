@@ -10,7 +10,6 @@ import (
 
 	aeron "github.com/andrewwormald/aergo/pkg/aeron"
 	aeroncluster "github.com/andrewwormald/aergo/pkg/cluster"
-	"github.com/andrewwormald/aergo/pkg/codec/cluster"
 )
 
 var (
@@ -88,17 +87,17 @@ func (l *clusterListener) OnMessage(c aeroncluster.Cluster, timestamp int64, buf
 	log.Printf("cluster message: timestamp=%d payload=%d bytes", timestamp, length)
 }
 
-func (l *clusterListener) OnSessionEvent(c aeroncluster.Cluster, event *cluster.SessionEvent) {
+func (l *clusterListener) OnSessionEvent(c aeroncluster.Cluster, event *aeroncluster.SessionEvent) {
 	log.Printf("session event: code=%d detail=%s session=%d leader=%d",
 		event.Code, event.Detail, event.ClusterSessionId, event.LeaderMemberId)
 }
 
-func (l *clusterListener) OnNewLeader(c aeroncluster.Cluster, event *cluster.NewLeaderEvent) {
+func (l *clusterListener) OnNewLeader(c aeroncluster.Cluster, event *aeroncluster.NewLeaderEvent) {
 	log.Printf("new leader: member=%d term=%d endpoints=%s",
 		event.LeaderMemberId, event.LeadershipTermId, event.IngressEndpoints)
 }
 
-func (l *clusterListener) OnChallenge(c aeroncluster.Cluster, challenge *cluster.Challenge) []byte {
+func (l *clusterListener) OnChallenge(c aeroncluster.Cluster, challenge *aeroncluster.Challenge) []byte {
 	log.Printf("challenge received: correlationId=%d, %d bytes", challenge.CorrelationId, len(challenge.ChallengeData))
 	return nil
 }

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/andrewwormald/aergo/pkg/codec/sbe"
+	
 )
 
 func TestSessionMessageHeaderRoundTrip(t *testing.T) {
@@ -15,11 +15,11 @@ func TestSessionMessageHeaderRoundTrip(t *testing.T) {
 		Timestamp:        1234567890,
 	}
 	n := msg.Encode(buf, 0)
-	if n != sbe.HeaderSize+sessionMessageHeaderBlockLength {
-		t.Fatalf("expected %d bytes, got %d", sbe.HeaderSize+sessionMessageHeaderBlockLength, n)
+	if n != HeaderSize+sessionMessageHeaderBlockLength {
+		t.Fatalf("expected %d bytes, got %d", HeaderSize+sessionMessageHeaderBlockLength, n)
 	}
 
-	var hdr sbe.MessageHeader
+	var hdr MessageHeader
 	hdr.Decode(buf, 0)
 	if hdr.TemplateId != TemplateIdSessionMessageHeader {
 		t.Fatalf("expected template %d, got %d", TemplateIdSessionMessageHeader, hdr.TemplateId)
@@ -32,7 +32,7 @@ func TestSessionMessageHeaderRoundTrip(t *testing.T) {
 	}
 
 	var decoded SessionMessageHeader
-	decoded.Decode(buf, sbe.HeaderSize)
+	decoded.Decode(buf, HeaderSize)
 	if decoded.LeadershipTermId != 42 {
 		t.Fatalf("LeadershipTermId: expected 42, got %d", decoded.LeadershipTermId)
 	}
@@ -54,16 +54,16 @@ func TestSessionConnectRequestRoundTrip(t *testing.T) {
 	}
 	n := msg.Encode(buf, 0)
 
-	var hdr sbe.MessageHeader
+	var hdr MessageHeader
 	hdr.Decode(buf, 0)
 	if hdr.TemplateId != TemplateIdSessionConnectRequest {
 		t.Fatalf("expected template %d, got %d", TemplateIdSessionConnectRequest, hdr.TemplateId)
 	}
 
 	var decoded SessionConnectRequest
-	consumed := decoded.Decode(buf, sbe.HeaderSize)
-	if consumed != n-sbe.HeaderSize {
-		t.Fatalf("consumed %d, expected %d", consumed, n-sbe.HeaderSize)
+	consumed := decoded.Decode(buf, HeaderSize)
+	if consumed != n-HeaderSize {
+		t.Fatalf("consumed %d, expected %d", consumed, n-HeaderSize)
 	}
 	if decoded.CorrelationId != 99 {
 		t.Fatalf("CorrelationId: expected 99, got %d", decoded.CorrelationId)
@@ -91,16 +91,16 @@ func TestSessionEventRoundTrip(t *testing.T) {
 	}
 	n := msg.Encode(buf, 0)
 
-	var hdr sbe.MessageHeader
+	var hdr MessageHeader
 	hdr.Decode(buf, 0)
 	if hdr.TemplateId != TemplateIdSessionEvent {
 		t.Fatalf("expected template %d, got %d", TemplateIdSessionEvent, hdr.TemplateId)
 	}
 
 	var decoded SessionEvent
-	consumed := decoded.Decode(buf, sbe.HeaderSize)
-	if consumed != n-sbe.HeaderSize {
-		t.Fatalf("consumed %d, expected %d", consumed, n-sbe.HeaderSize)
+	consumed := decoded.Decode(buf, HeaderSize)
+	if consumed != n-HeaderSize {
+		t.Fatalf("consumed %d, expected %d", consumed, n-HeaderSize)
 	}
 	if decoded.ClusterSessionId != 12 {
 		t.Fatalf("ClusterSessionId: expected 12, got %d", decoded.ClusterSessionId)
@@ -125,7 +125,7 @@ func TestSessionCloseRequestRoundTrip(t *testing.T) {
 	n := msg.Encode(buf, 0)
 
 	var decoded SessionCloseRequest
-	decoded.Decode(buf, sbe.HeaderSize)
+	decoded.Decode(buf, HeaderSize)
 	if decoded.ClusterSessionId != 55 {
 		t.Fatalf("ClusterSessionId: expected 55, got %d", decoded.ClusterSessionId)
 	}
@@ -144,7 +144,7 @@ func TestSessionKeepAliveRoundTrip(t *testing.T) {
 	msg.Encode(buf, 0)
 
 	var decoded SessionKeepAlive
-	decoded.Decode(buf, sbe.HeaderSize)
+	decoded.Decode(buf, HeaderSize)
 	if decoded.LeadershipTermId != 7 {
 		t.Fatalf("LeadershipTermId: expected 7, got %d", decoded.LeadershipTermId)
 	}
@@ -164,9 +164,9 @@ func TestNewLeaderEventRoundTrip(t *testing.T) {
 	n := msg.Encode(buf, 0)
 
 	var decoded NewLeaderEvent
-	consumed := decoded.Decode(buf, sbe.HeaderSize)
-	if consumed != n-sbe.HeaderSize {
-		t.Fatalf("consumed %d, expected %d", consumed, n-sbe.HeaderSize)
+	consumed := decoded.Decode(buf, HeaderSize)
+	if consumed != n-HeaderSize {
+		t.Fatalf("consumed %d, expected %d", consumed, n-HeaderSize)
 	}
 	if decoded.LeaderMemberId != 1 {
 		t.Fatalf("LeaderMemberId: expected 1, got %d", decoded.LeaderMemberId)
@@ -188,9 +188,9 @@ func TestChallengeRoundTrip(t *testing.T) {
 	n := msg.Encode(buf, 0)
 
 	var decoded Challenge
-	consumed := decoded.Decode(buf, sbe.HeaderSize)
-	if consumed != n-sbe.HeaderSize {
-		t.Fatalf("consumed %d, expected %d", consumed, n-sbe.HeaderSize)
+	consumed := decoded.Decode(buf, HeaderSize)
+	if consumed != n-HeaderSize {
+		t.Fatalf("consumed %d, expected %d", consumed, n-HeaderSize)
 	}
 	if decoded.ClusterSessionId != 33 {
 		t.Fatalf("ClusterSessionId: expected 33, got %d", decoded.ClusterSessionId)
@@ -211,9 +211,9 @@ func TestChallengeResponseRoundTrip(t *testing.T) {
 	n := msg.Encode(buf, 0)
 
 	var decoded ChallengeResponse
-	consumed := decoded.Decode(buf, sbe.HeaderSize)
-	if consumed != n-sbe.HeaderSize {
-		t.Fatalf("consumed %d, expected %d", consumed, n-sbe.HeaderSize)
+	consumed := decoded.Decode(buf, HeaderSize)
+	if consumed != n-HeaderSize {
+		t.Fatalf("consumed %d, expected %d", consumed, n-HeaderSize)
 	}
 	if decoded.CorrelationId != 77 {
 		t.Fatalf("CorrelationId: expected 77, got %d", decoded.CorrelationId)
@@ -261,7 +261,7 @@ func TestMessageHeaderDispatch(t *testing.T) {
 	for _, tc := range templates {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.encode()
-			var hdr sbe.MessageHeader
+			var hdr MessageHeader
 			hdr.Decode(buf, 0)
 			if hdr.TemplateId != tc.expected {
 				t.Fatalf("expected template %d, got %d", tc.expected, hdr.TemplateId)

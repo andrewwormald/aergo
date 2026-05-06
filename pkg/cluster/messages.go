@@ -1,6 +1,7 @@
 package cluster
 
-import "github.com/andrewwormald/aergo/pkg/codec/sbe"
+
+
 
 // Aeron cluster protocol message template IDs.
 const (
@@ -52,16 +53,16 @@ type SessionMessageHeader struct {
 const sessionMessageHeaderBlockLength = 24
 
 func (m *SessionMessageHeader) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: sessionMessageHeaderBlockLength,
 		TemplateId:  TemplateIdSessionMessageHeader,
 		SchemaId:    SchemaId,
 		Version:     SchemaVersion,
 	}
 	n := hdr.Encode(buf, offset)
-	sbe.PutInt64(buf, offset+n+0, m.LeadershipTermId)
-	sbe.PutInt64(buf, offset+n+8, m.ClusterSessionId)
-	sbe.PutInt64(buf, offset+n+16, m.Timestamp)
+	putInt64(buf, offset+n+0, m.LeadershipTermId)
+	putInt64(buf, offset+n+8, m.ClusterSessionId)
+	putInt64(buf, offset+n+16, m.Timestamp)
 	return n + sessionMessageHeaderBlockLength
 }
 
@@ -70,9 +71,9 @@ func (m *SessionMessageHeader) Decode(buf []byte, offset int) int {
 }
 
 func (m *SessionMessageHeader) DecodeWithBlockLength(buf []byte, offset int, blockLength int) int {
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+0)
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+8)
-	m.Timestamp = sbe.GetInt64(buf, offset+16)
+	m.LeadershipTermId = getInt64(buf, offset+0)
+	m.ClusterSessionId = getInt64(buf, offset+8)
+	m.Timestamp = getInt64(buf, offset+16)
 	return blockLength
 }
 
@@ -104,7 +105,7 @@ type SessionEvent struct {
 const sessionEventBlockLength = 32
 
 func (m *SessionEvent) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: sessionEventBlockLength,
 		TemplateId:  TemplateIdSessionEvent,
 		SchemaId:    SchemaId,
@@ -112,13 +113,13 @@ func (m *SessionEvent) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.ClusterSessionId)
-	sbe.PutInt64(buf, base+8, m.CorrelationId)
-	sbe.PutInt64(buf, base+16, m.LeadershipTermId)
-	sbe.PutInt32(buf, base+24, m.LeaderMemberId)
-	sbe.PutInt32(buf, base+28, int32(m.Code))
+	putInt64(buf, base+0, m.ClusterSessionId)
+	putInt64(buf, base+8, m.CorrelationId)
+	putInt64(buf, base+16, m.LeadershipTermId)
+	putInt32(buf, base+24, m.LeaderMemberId)
+	putInt32(buf, base+28, int32(m.Code))
 	varOffset := base + sessionEventBlockLength
-	varN := sbe.PutVarString(buf, varOffset, m.Detail)
+	varN := putVarString(buf, varOffset, m.Detail)
 	return n + sessionEventBlockLength + varN
 }
 
@@ -127,13 +128,13 @@ func (m *SessionEvent) Decode(buf []byte, offset int) int {
 }
 
 func (m *SessionEvent) DecodeWithBlockLength(buf []byte, offset int, blockLength int) int {
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+0)
-	m.CorrelationId = sbe.GetInt64(buf, offset+8)
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+16)
-	m.LeaderMemberId = sbe.GetInt32(buf, offset+24)
-	m.Code = EventCode(sbe.GetInt32(buf, offset+28))
+	m.ClusterSessionId = getInt64(buf, offset+0)
+	m.CorrelationId = getInt64(buf, offset+8)
+	m.LeadershipTermId = getInt64(buf, offset+16)
+	m.LeaderMemberId = getInt32(buf, offset+24)
+	m.Code = EventCode(getInt32(buf, offset+28))
 	varOffset := offset + blockLength
-	detail, varN := sbe.GetVarString(buf, varOffset)
+	detail, varN := getVarString(buf, varOffset)
 	m.Detail = detail
 	return blockLength + varN
 }
@@ -162,7 +163,7 @@ type SessionConnectRequest struct {
 const sessionConnectRequestBlockLength = 16
 
 func (m *SessionConnectRequest) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: sessionConnectRequestBlockLength,
 		TemplateId:  TemplateIdSessionConnectRequest,
 		SchemaId:    SchemaId,
@@ -170,20 +171,20 @@ func (m *SessionConnectRequest) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.CorrelationId)
-	sbe.PutInt32(buf, base+8, m.ResponseStreamId)
-	sbe.PutInt32(buf, base+12, m.Version)
+	putInt64(buf, base+0, m.CorrelationId)
+	putInt32(buf, base+8, m.ResponseStreamId)
+	putInt32(buf, base+12, m.Version)
 	varOffset := base + sessionConnectRequestBlockLength
-	varN := sbe.PutVarString(buf, varOffset, m.ResponseChannel)
+	varN := putVarString(buf, varOffset, m.ResponseChannel)
 	return n + sessionConnectRequestBlockLength + varN
 }
 
 func (m *SessionConnectRequest) Decode(buf []byte, offset int) int {
-	m.CorrelationId = sbe.GetInt64(buf, offset+0)
-	m.ResponseStreamId = sbe.GetInt32(buf, offset+8)
-	m.Version = sbe.GetInt32(buf, offset+12)
+	m.CorrelationId = getInt64(buf, offset+0)
+	m.ResponseStreamId = getInt32(buf, offset+8)
+	m.Version = getInt32(buf, offset+12)
 	varOffset := offset + sessionConnectRequestBlockLength
-	ch, varN := sbe.GetVarString(buf, varOffset)
+	ch, varN := getVarString(buf, varOffset)
 	m.ResponseChannel = ch
 	return sessionConnectRequestBlockLength + varN
 }
@@ -206,7 +207,7 @@ type SessionCloseRequest struct {
 const sessionCloseRequestBlockLength = 16
 
 func (m *SessionCloseRequest) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: sessionCloseRequestBlockLength,
 		TemplateId:  TemplateIdSessionCloseRequest,
 		SchemaId:    SchemaId,
@@ -214,14 +215,14 @@ func (m *SessionCloseRequest) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.ClusterSessionId)
-	sbe.PutInt64(buf, base+8, m.LeadershipTermId)
+	putInt64(buf, base+0, m.ClusterSessionId)
+	putInt64(buf, base+8, m.LeadershipTermId)
 	return n + sessionCloseRequestBlockLength
 }
 
 func (m *SessionCloseRequest) Decode(buf []byte, offset int) int {
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+0)
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+8)
+	m.ClusterSessionId = getInt64(buf, offset+0)
+	m.LeadershipTermId = getInt64(buf, offset+8)
 	return sessionCloseRequestBlockLength
 }
 
@@ -243,7 +244,7 @@ type SessionKeepAlive struct {
 const sessionKeepAliveBlockLength = 16
 
 func (m *SessionKeepAlive) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: sessionKeepAliveBlockLength,
 		TemplateId:  TemplateIdSessionKeepAlive,
 		SchemaId:    SchemaId,
@@ -251,14 +252,14 @@ func (m *SessionKeepAlive) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.LeadershipTermId)
-	sbe.PutInt64(buf, base+8, m.ClusterSessionId)
+	putInt64(buf, base+0, m.LeadershipTermId)
+	putInt64(buf, base+8, m.ClusterSessionId)
 	return n + sessionKeepAliveBlockLength
 }
 
 func (m *SessionKeepAlive) Decode(buf []byte, offset int) int {
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+0)
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+8)
+	m.LeadershipTermId = getInt64(buf, offset+0)
+	m.ClusterSessionId = getInt64(buf, offset+8)
 	return sessionKeepAliveBlockLength
 }
 
@@ -286,7 +287,7 @@ type NewLeaderEvent struct {
 const newLeaderEventBlockLength = 20
 
 func (m *NewLeaderEvent) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: newLeaderEventBlockLength,
 		TemplateId:  TemplateIdNewLeaderEvent,
 		SchemaId:    SchemaId,
@@ -294,11 +295,11 @@ func (m *NewLeaderEvent) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.ClusterSessionId)
-	sbe.PutInt64(buf, base+8, m.LeadershipTermId)
-	sbe.PutInt32(buf, base+16, m.LeaderMemberId)
+	putInt64(buf, base+0, m.ClusterSessionId)
+	putInt64(buf, base+8, m.LeadershipTermId)
+	putInt32(buf, base+16, m.LeaderMemberId)
 	varOffset := base + newLeaderEventBlockLength
-	varN := sbe.PutVarString(buf, varOffset, m.IngressEndpoints)
+	varN := putVarString(buf, varOffset, m.IngressEndpoints)
 	return n + newLeaderEventBlockLength + varN
 }
 
@@ -307,11 +308,11 @@ func (m *NewLeaderEvent) Decode(buf []byte, offset int) int {
 }
 
 func (m *NewLeaderEvent) DecodeWithBlockLength(buf []byte, offset int, blockLength int) int {
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+0)
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+8)
-	m.LeaderMemberId = sbe.GetInt32(buf, offset+16)
+	m.ClusterSessionId = getInt64(buf, offset+0)
+	m.LeadershipTermId = getInt64(buf, offset+8)
+	m.LeaderMemberId = getInt32(buf, offset+16)
 	varOffset := offset + blockLength
-	ep, varN := sbe.GetVarString(buf, varOffset)
+	ep, varN := getVarString(buf, varOffset)
 	m.IngressEndpoints = ep
 	return blockLength + varN
 }
@@ -340,7 +341,7 @@ type Challenge struct {
 const challengeBlockLength = 24
 
 func (m *Challenge) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: challengeBlockLength,
 		TemplateId:  TemplateIdChallenge,
 		SchemaId:    SchemaId,
@@ -348,11 +349,11 @@ func (m *Challenge) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.ClusterSessionId)
-	sbe.PutInt64(buf, base+8, m.CorrelationId)
-	sbe.PutInt64(buf, base+16, m.LeadershipTermId)
+	putInt64(buf, base+0, m.ClusterSessionId)
+	putInt64(buf, base+8, m.CorrelationId)
+	putInt64(buf, base+16, m.LeadershipTermId)
 	varOffset := base + challengeBlockLength
-	sbe.PutUint32(buf, varOffset, uint32(len(m.ChallengeData)))
+	putUint32(buf, varOffset, uint32(len(m.ChallengeData)))
 	copy(buf[varOffset+4:], m.ChallengeData)
 	return n + challengeBlockLength + 4 + len(m.ChallengeData)
 }
@@ -362,11 +363,11 @@ func (m *Challenge) Decode(buf []byte, offset int) int {
 }
 
 func (m *Challenge) DecodeWithBlockLength(buf []byte, offset int, blockLength int) int {
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+0)
-	m.CorrelationId = sbe.GetInt64(buf, offset+8)
-	m.LeadershipTermId = sbe.GetInt64(buf, offset+16)
+	m.ClusterSessionId = getInt64(buf, offset+0)
+	m.CorrelationId = getInt64(buf, offset+8)
+	m.LeadershipTermId = getInt64(buf, offset+16)
 	varOffset := offset + blockLength
-	length := int(sbe.GetUint32(buf, varOffset))
+	length := int(getUint32(buf, varOffset))
 	m.ChallengeData = make([]byte, length)
 	copy(m.ChallengeData, buf[varOffset+4:varOffset+4+length])
 	return blockLength + 4 + length
@@ -394,7 +395,7 @@ type ChallengeResponse struct {
 const challengeResponseBlockLength = 16
 
 func (m *ChallengeResponse) Encode(buf []byte, offset int) int {
-	hdr := sbe.MessageHeader{
+	hdr := MessageHeader{
 		BlockLength: challengeResponseBlockLength,
 		TemplateId:  TemplateIdChallengeResponse,
 		SchemaId:    SchemaId,
@@ -402,19 +403,19 @@ func (m *ChallengeResponse) Encode(buf []byte, offset int) int {
 	}
 	n := hdr.Encode(buf, offset)
 	base := offset + n
-	sbe.PutInt64(buf, base+0, m.CorrelationId)
-	sbe.PutInt64(buf, base+8, m.ClusterSessionId)
+	putInt64(buf, base+0, m.CorrelationId)
+	putInt64(buf, base+8, m.ClusterSessionId)
 	varOffset := base + challengeResponseBlockLength
-	sbe.PutUint32(buf, varOffset, uint32(len(m.ChallengeData)))
+	putUint32(buf, varOffset, uint32(len(m.ChallengeData)))
 	copy(buf[varOffset+4:], m.ChallengeData)
 	return n + challengeResponseBlockLength + 4 + len(m.ChallengeData)
 }
 
 func (m *ChallengeResponse) Decode(buf []byte, offset int) int {
-	m.CorrelationId = sbe.GetInt64(buf, offset+0)
-	m.ClusterSessionId = sbe.GetInt64(buf, offset+8)
+	m.CorrelationId = getInt64(buf, offset+0)
+	m.ClusterSessionId = getInt64(buf, offset+8)
 	varOffset := offset + challengeResponseBlockLength
-	length := int(sbe.GetUint32(buf, varOffset))
+	length := int(getUint32(buf, varOffset))
 	m.ChallengeData = make([]byte, length)
 	copy(m.ChallengeData, buf[varOffset+4:varOffset+4+length])
 	return challengeResponseBlockLength + 4 + length
