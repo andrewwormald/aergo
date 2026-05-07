@@ -61,13 +61,15 @@ const removeMsgLen = 24
 
 // Keepalive command message layout.
 //
-//	offset 0:   clientID  int64
-const keepaliveMsgLen = 8
+//	offset 0:   clientID       int64
+//	offset 8:   correlationID  int64
+const keepaliveMsgLen = 16
 
 // ClientClose command message layout.
 //
-//	offset 0:   clientID  int64
-const clientCloseMsgLen = 8
+//	offset 0:   clientID       int64
+//	offset 8:   correlationID  int64
+const clientCloseMsgLen = 16
 
 // DriverProxy sends commands to the media driver via the to-driver ring buffer.
 type DriverProxy struct {
@@ -127,6 +129,7 @@ func (p *DriverProxy) RemoveSubscription(registrationID int64) int64 {
 func (p *DriverProxy) SendClientKeepalive() bool {
 	buf := make([]byte, keepaliveMsgLen)
 	binary.LittleEndian.PutUint64(buf[0:], uint64(p.clientID))
+	binary.LittleEndian.PutUint64(buf[8:], uint64(p.rb.NextCorrelationID()))
 	return p.rb.Write(CmdClientKeepalive, buf)
 }
 
@@ -134,6 +137,7 @@ func (p *DriverProxy) SendClientKeepalive() bool {
 func (p *DriverProxy) ClientClose() bool {
 	buf := make([]byte, clientCloseMsgLen)
 	binary.LittleEndian.PutUint64(buf[0:], uint64(p.clientID))
+	binary.LittleEndian.PutUint64(buf[8:], uint64(p.rb.NextCorrelationID()))
 	return p.rb.Write(CmdClientClose, buf)
 }
 
