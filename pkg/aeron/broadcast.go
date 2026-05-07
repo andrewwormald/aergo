@@ -127,6 +127,11 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 
 	for count < limit && r.ReceiveNext() {
 		length := r.Length()
+		if length < 0 {
+			// Record was overwritten mid-read (lapped). Skip and revalidate.
+			r.Validate()
+			continue
+		}
 		if int(length) > len(cr.scratch) {
 			cr.scratch = make([]byte, length)
 		}
