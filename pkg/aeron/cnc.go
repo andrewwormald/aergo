@@ -53,7 +53,7 @@ type MappedCnc struct {
 // MapCnc opens and memory-maps the CnC file from an Aeron media driver directory.
 func MapCnc(aeronDir string) (*MappedCnc, error) {
 	path := filepath.Join(aeronDir, CncFilename)
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open cnc: %w", err)
 	}
