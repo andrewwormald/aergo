@@ -50,10 +50,16 @@ func (b *AtomicBuffer) ptrAt(offset int32) unsafe.Pointer {
 // --- Non-atomic reads ---
 
 func (b *AtomicBuffer) GetInt32(offset int32) int32 {
+	if offset < 0 || offset+4 > b.length {
+		return 0
+	}
 	return *(*int32)(b.ptrAt(offset))
 }
 
 func (b *AtomicBuffer) GetInt64(offset int32) int64 {
+	if offset < 0 || offset+8 > b.length {
+		return 0
+	}
 	return *(*int64)(b.ptrAt(offset))
 }
 
@@ -62,6 +68,9 @@ func (b *AtomicBuffer) GetUint8(offset int32) uint8 {
 }
 
 func (b *AtomicBuffer) GetBytes(offset int32, dst []byte) {
+	if offset < 0 || int64(offset)+int64(len(dst)) > int64(b.length) {
+		return // Out of bounds — caller must validate after.
+	}
 	src := unsafe.Slice((*byte)(b.ptrAt(offset)), len(dst))
 	copy(dst, src)
 }

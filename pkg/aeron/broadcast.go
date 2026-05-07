@@ -138,6 +138,10 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 
 		msgTypeID := r.MsgTypeID()
 		offset := r.Offset()
+		if offset < 0 || int64(offset)+int64(length) > int64(r.buffer.Capacity()) {
+			r.Validate()
+			continue
+		}
 		r.buffer.GetBytes(offset, cr.scratch[:length])
 
 		if r.Validate() {
