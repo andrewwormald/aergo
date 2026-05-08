@@ -108,6 +108,7 @@ func (r *BroadcastReceiver) validate(cursor int64) bool {
 type CopyBroadcastReceiver struct {
 	receiver *BroadcastReceiver
 	scratch  []byte
+	debugLog func(msgTypeID, length, recordOffset int32)
 }
 
 // NewCopyBroadcastReceiver creates a copying broadcast receiver.
@@ -116,6 +117,11 @@ func NewCopyBroadcastReceiver(receiver *BroadcastReceiver) *CopyBroadcastReceive
 		receiver: receiver,
 		scratch:  make([]byte, 4096),
 	}
+}
+
+// SetDebugLog sets a callback invoked for every delivered message, useful for diagnostics.
+func (cr *CopyBroadcastReceiver) SetDebugLog(fn func(msgTypeID, length, recordOffset int32)) {
+	cr.debugLog = fn
 }
 
 // MessageHandler is called for each broadcast message received.
@@ -130,14 +136,10 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 	for count < limit && r.ReceiveNext() {
 		length := r.Length()
 		if length < 0 {
-			// Record was overwritten mid-read (lapped). Skip and revalidate.
 			r.Validate()
 			continue
 		}
 
-		// Copy the full record (header + payload) to scratch so we read
-		// a consistent snapshot. The live buffer may be overwritten at any
-		// time by the single-producer (media driver).
 		recordLen := RecordHeaderLength + length
 		if int(recordLen) > len(cr.scratch) {
 			cr.scratch = make([]byte, recordLen)
@@ -153,6 +155,9 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 		if r.Validate() {
 			msgTypeID := int32(cr.scratch[4]) | int32(cr.scratch[5])<<8 |
 				int32(cr.scratch[6])<<16 | int32(cr.scratch[7])<<24
+			if cr.debugLog != nil {
+				cr.debugLog(msgTypeID, length, recordOffset)
+			}
 			handler(msgTypeID, cr.scratch, RecordHeaderLength, length)
 			count++
 		}

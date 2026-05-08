@@ -103,6 +103,12 @@ func NewConductor(cfg Context) (*Conductor, error) {
 		subscriptions:    make(map[int64]*subscriptionState),
 	}
 
+	// Enable broadcast receiver debug logging
+	copyReceiver.SetDebugLog(func(msgTypeID, length, recordOffset int32) {
+		log.Printf("conductor: broadcast recv msgTypeID=0x%04x length=%d recordOffset=%d",
+			msgTypeID, length, recordOffset)
+	})
+
 	return c, nil
 }
 
@@ -207,19 +213,25 @@ func (c *Conductor) DoWork() int {
 }
 
 func (c *Conductor) onDriverMessage(msgTypeID int32, buffer []byte, offset, length int32) {
+	log.Printf("conductor: onDriverMessage msgTypeID=0x%04x offset=%d length=%d bufLen=%d",
+		msgTypeID, offset, length, len(buffer))
+
 	switch msgTypeID {
 	case RespOnPublication, RespOnExclusivePublication:
-		c.onNewPublication(buffer[offset:offset+length])
+		c.onNewPublication(buffer[offset : offset+length])
 	case RespOnSubscription:
-		c.onSubscriptionReady(buffer[offset:offset+length])
+		log.Printf("conductor: dispatching onSubscriptionReady (0x%04x)", msgTypeID)
+		c.onSubscriptionReady(buffer[offset : offset+length])
 	case RespOnError:
-		c.onError(buffer[offset:offset+length])
+		c.onError(buffer[offset : offset+length])
 	case RespOnAvailableImage:
-		c.onAvailableImage(buffer[offset:offset+length])
+		c.onAvailableImage(buffer[offset : offset+length])
 	case RespOnUnavailableImage:
-		c.onUnavailableImage(buffer[offset:offset+length])
+		c.onUnavailableImage(buffer[offset : offset+length])
 	case RespOnOperationSuccess:
-		// ignore
+		log.Printf("conductor: operation success (ignored)")
+	default:
+		log.Printf("conductor: unknown msgTypeID=0x%04x", msgTypeID)
 	}
 }
 
@@ -276,17 +288,21 @@ func (c *Conductor) onNewPublication(msg []byte) {
 }
 
 func (c *Conductor) onSubscriptionReady(msg []byte) {
-	if len(msg) < 16 {
+	if len(msg) < 12 {
 		return
 	}
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
 	channelStatusID := int32(binary.LittleEndian.Uint32(msg[8:]))
+	log.Printf("conductor: SUB_READY corrID=%d channelStatusID=%d msgLen=%d", corrID, channelStatusID, len(msg))
 
 	c.mu.Lock()
 	sub := c.subscriptions[corrID]
 	if sub != nil {
 		sub.channelStatusID = channelStatusID
 		sub.ready = true
+		log.Printf("conductor: SUB_READY matched! corrID=%d", corrID)
+	} else {
+		log.Printf("conductor: SUB_READY no match for corrID=%d (have %d subs)", corrID, len(c.subscriptions))
 	}
 	c.mu.Unlock()
 }
