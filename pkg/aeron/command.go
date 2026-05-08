@@ -103,7 +103,7 @@ func (p *DriverProxy) AddExclusivePublication(channel string, streamID int32) in
 func (p *DriverProxy) AddSubscription(channel string, streamID int32) int64 {
 	corrID := p.rb.NextCorrelationID()
 
-	buf := make([]byte, subscriptionMsgFixedLen+4+len(channel))
+	buf := make([]byte, subscriptionMsgFixedLen+len(channel))
 	binary.LittleEndian.PutUint64(buf[0:], uint64(p.clientID))
 	binary.LittleEndian.PutUint64(buf[8:], uint64(corrID))
 	binary.LittleEndian.PutUint64(buf[16:], uint64(corrID)) // registrationCorrelationID = corrID
@@ -146,7 +146,7 @@ func (p *DriverProxy) ClientClose() bool {
 func (p *DriverProxy) sendPublicationCmd(cmdType int32, channel string, streamID int32) int64 {
 	corrID := p.rb.NextCorrelationID()
 
-	buf := make([]byte, publicationMsgFixedLen+4+len(channel))
+	buf := make([]byte, publicationMsgFixedLen+len(channel))
 	binary.LittleEndian.PutUint64(buf[0:], uint64(p.clientID))
 	binary.LittleEndian.PutUint64(buf[8:], uint64(corrID))
 	binary.LittleEndian.PutUint32(buf[16:], uint32(streamID))

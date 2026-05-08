@@ -128,3 +128,38 @@ func (c *MappedCnc) Close() error {
 func (c *MappedCnc) DriverHeartbeat() int64 {
 	return c.CounterValues.GetInt64Volatile(0)
 }
+
+// ReadErrorLog reads error entries from the driver's error log buffer.
+// Each entry: [length 4B][observationCount 4B][lastObservation 8B][firstObservation 8B][message varlen]
+func (c *MappedCnc) ReadErrorLog() []string {
+	buf := c.ErrorLogBuffer
+	capacity := buf.Capacity()
+	var errors []string
+	offset := int32(0)
+
+	for offset < capacity {
+		length := buf.GetInt32Volatile(offset)
+		if length == 0 {
+			break
+		}
+		if length < 24 || offset+length > capacity {
+			break
+		}
+		// Message starts at offset+24
+		msgLen := length - 24
+		if msgLen > 0 {
+			msg := make([]byte, msgLen)
+			buf.GetBytes(offset+24, msg)
+			// Trim trailing zeros
+			end := len(msg)
+			for end > 0 && msg[end-1] == 0 {
+				end--
+			}
+			if end > 0 {
+				errors = append(errors, string(msg[:end]))
+			}
+		}
+		offset += align(length, 8)
+	}
+	return errors
+}
