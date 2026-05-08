@@ -279,9 +279,6 @@ func (c *Conductor) onSubscriptionReady(msg []byte) {
 	if len(msg) < 16 {
 		return
 	}
-	// Response layout:
-	//   offset 0:  correlationID     int64
-	//   offset 8:  channelStatusID   int32
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
 	channelStatusID := int32(binary.LittleEndian.Uint32(msg[8:]))
 

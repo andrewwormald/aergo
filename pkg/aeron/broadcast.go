@@ -1,11 +1,13 @@
 package aeron
 
 // Broadcast buffer trailer layout (single-producer to multiple-consumers).
+// Matches agrona BroadcastBufferDescriptor: counters are packed at 8-byte
+// intervals, trailer is CACHE_LINE_LENGTH * 2 bytes.
 const (
 	bcTailIntentCounterOff = int32(0)
-	bcTailCounterOff       = int32(CacheLineLength)
-	bcLatestCounterOff     = int32(2 * CacheLineLength)
-	bcTrailerLength        = int32(3 * CacheLineLength)
+	bcTailCounterOff       = int32(8)
+	bcLatestCounterOff     = int32(16)
+	bcTrailerLength        = int32(CacheLineLength * 2)
 )
 
 // BroadcastReceiver reads messages from the media driver's to-clients broadcast buffer.
@@ -132,20 +134,26 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 			r.Validate()
 			continue
 		}
-		if int(length) > len(cr.scratch) {
-			cr.scratch = make([]byte, length)
+
+		// Copy the full record (header + payload) to scratch so we read
+		// a consistent snapshot. The live buffer may be overwritten at any
+		// time by the single-producer (media driver).
+		recordLen := RecordHeaderLength + length
+		if int(recordLen) > len(cr.scratch) {
+			cr.scratch = make([]byte, recordLen)
 		}
 
-		msgTypeID := r.MsgTypeID()
-		offset := r.Offset()
-		if offset < 0 || int64(offset)+int64(length) > int64(r.buffer.Capacity()) {
+		recordOffset := r.recordOffset
+		if recordOffset < 0 || int64(recordOffset)+int64(recordLen) > int64(r.buffer.Capacity()) {
 			r.Validate()
 			continue
 		}
-		r.buffer.GetBytes(offset, cr.scratch[:length])
+		r.buffer.GetBytes(recordOffset, cr.scratch[:recordLen])
 
 		if r.Validate() {
-			handler(msgTypeID, cr.scratch, 0, length)
+			msgTypeID := int32(cr.scratch[4]) | int32(cr.scratch[5])<<8 |
+				int32(cr.scratch[6])<<16 | int32(cr.scratch[7])<<24
+			handler(msgTypeID, cr.scratch, RecordHeaderLength, length)
 			count++
 		}
 	}
