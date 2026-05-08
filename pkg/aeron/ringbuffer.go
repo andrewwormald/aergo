@@ -49,14 +49,14 @@ func (rb *ManyToOneRingBuffer) Write(msgTypeID int32, src []byte) bool {
 
 	index := tailPos & (rb.capacity - 1)
 
-	// Write record header: negative length = uncommitted
-	rb.buffer.PutInt32(index, -recordLength)
-	rb.buffer.PutInt32(index+4, msgTypeID)
-
-	// Write payload
+	// Write record: match Java Agrona ManyToOneRingBuffer.write ordering.
+	// 1. Set length negative (uncommitted)
+	rb.buffer.PutInt32Ordered(index, -recordLength)
+	// 2. Write payload
 	rb.buffer.PutBytes(index+RecordHeaderLength, src)
-
-	// Commit: set length to positive (ordered store makes payload visible)
+	// 3. Write type ID
+	rb.buffer.PutInt32(index+4, msgTypeID)
+	// 4. Commit: set length positive (ordered store makes record visible)
 	rb.buffer.PutInt32Ordered(index, recordLength)
 
 	return true

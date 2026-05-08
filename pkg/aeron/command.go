@@ -106,7 +106,7 @@ func (p *DriverProxy) AddSubscription(channel string, streamID int32) int64 {
 	buf := make([]byte, subscriptionMsgFixedLen+len(channel))
 	binary.LittleEndian.PutUint64(buf[0:], uint64(p.clientID))
 	binary.LittleEndian.PutUint64(buf[8:], uint64(corrID))
-	binary.LittleEndian.PutUint64(buf[16:], uint64(corrID)) // registrationCorrelationID = corrID
+	binary.LittleEndian.PutUint64(buf[16:], ^uint64(0)) // registrationCorrelationID = NULL_VALUE (-1)
 	binary.LittleEndian.PutUint32(buf[24:], uint32(streamID))
 	binary.LittleEndian.PutUint32(buf[28:], uint32(len(channel)))
 	copy(buf[32:], channel)
