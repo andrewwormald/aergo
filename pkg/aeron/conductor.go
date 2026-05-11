@@ -19,6 +19,8 @@ type Conductor struct {
 	keepaliveInterNs int64
 	lastKeepaliveNs  int64
 
+	heartbeatCounterId int32
+
 	mu           sync.Mutex
 	publications map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
@@ -93,14 +95,15 @@ func NewConductor(cfg Context) (*Conductor, error) {
 	proxy := NewDriverProxy(toDriverRB, clientID)
 
 	c := &Conductor{
-		cnc:              cnc,
-		proxy:            proxy,
-		broadcastRecv:    copyReceiver,
-		clientID:         clientID,
-		driverTimeoutNs:  cfg.DriverTimeoutMs * 1_000_000,
-		keepaliveInterNs: cfg.KeepaliveInterMs * 1_000_000,
-		publications:     make(map[int64]*publicationState),
-		subscriptions:    make(map[int64]*subscriptionState),
+		cnc:                cnc,
+		proxy:              proxy,
+		broadcastRecv:      copyReceiver,
+		clientID:           clientID,
+		driverTimeoutNs:    cfg.DriverTimeoutMs * 1_000_000,
+		keepaliveInterNs:   cfg.KeepaliveInterMs * 1_000_000,
+		heartbeatCounterId: -1,
+		publications:       make(map[int64]*publicationState),
+		subscriptions:      make(map[int64]*subscriptionState),
 	}
 
 	// Enable broadcast receiver debug logging
@@ -213,9 +216,23 @@ func (c *Conductor) DoWork() int {
 	if now-c.lastKeepaliveNs > c.keepaliveInterNs {
 		rbHead := c.proxy.rb.HeadPosition()
 		rbTail := c.proxy.rb.TailPosition()
-		log.Printf("conductor: keepalive tick rbHead=%d rbTail=%d pending=%d",
-			rbHead, rbTail, rbTail-rbHead)
+		log.Printf("conductor: keepalive tick rbHead=%d rbTail=%d pending=%d heartbeatCounter=%d",
+			rbHead, rbTail, rbTail-rbHead, c.heartbeatCounterId)
 		c.proxy.SendClientKeepalive()
+
+		// Find and update heartbeat counter (driver uses this for client liveness)
+		if c.heartbeatCounterId < 0 {
+			c.heartbeatCounterId = FindHeartbeatCounter(
+				c.cnc.CounterMetadata, c.cnc.CounterValues, c.clientID)
+			if c.heartbeatCounterId >= 0 {
+				log.Printf("conductor: found heartbeat counter ID=%d for clientID=%d",
+					c.heartbeatCounterId, c.clientID)
+			}
+		}
+		if c.heartbeatCounterId >= 0 {
+			UpdateHeartbeatCounter(c.cnc.CounterValues, c.heartbeatCounterId)
+		}
+
 		c.lastKeepaliveNs = now
 	}
 
