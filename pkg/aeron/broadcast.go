@@ -1,5 +1,7 @@
 package aeron
 
+import "log"
+
 // Broadcast buffer trailer layout (single-producer to multiple-consumers).
 // Matches agrona BroadcastBufferDescriptor: counters are packed at 8-byte
 // intervals, trailer is CACHE_LINE_LENGTH * 2 bytes.
@@ -66,10 +68,14 @@ func (r *BroadcastReceiver) ReceiveNext() bool {
 		alignedLen := align(length, RecordAlignment)
 		msgTypeID := r.buffer.GetInt32(r.recordOffset + 4)
 
+		log.Printf("broadcast: ReceiveNext recordOffset=%d length=%d alignedLen=%d msgTypeID=0x%04x tail=%d nextRecord=%d cursor=%d",
+			r.recordOffset, length, alignedLen, uint32(msgTypeID), tail, r.nextRecord, r.cursor)
+
 		r.cursor = r.nextRecord
 		r.nextRecord += int64(alignedLen)
 
 		if msgTypeID == PaddingMsgTypeID {
+			log.Printf("broadcast: skipping padding at offset=%d, advancing to nextRecord=%d", r.recordOffset, r.nextRecord)
 			continue
 		}
 
