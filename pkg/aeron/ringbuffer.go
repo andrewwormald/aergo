@@ -1,6 +1,9 @@
 package aeron
 
-import "errors"
+import (
+	"errors"
+	"log"
+)
 
 // Ring buffer record header layout.
 const (
@@ -42,6 +45,8 @@ func (rb *ManyToOneRingBuffer) Write(msgTypeID int32, src []byte) bool {
 	recordLength := int32(RecordHeaderLength + len(src))
 	alignedLength := align(recordLength, RecordAlignment)
 
+	headBefore := rb.buffer.GetInt64Volatile(rb.capacity + rbHeadPositionOffset)
+
 	tailPos, ok := rb.claimCapacity(alignedLength)
 	if !ok {
 		return false
@@ -58,6 +63,9 @@ func (rb *ManyToOneRingBuffer) Write(msgTypeID int32, src []byte) bool {
 	rb.buffer.PutInt32(index+4, msgTypeID)
 	// 4. Commit: set length positive (ordered store makes record visible)
 	rb.buffer.PutInt32Ordered(index, recordLength)
+
+	log.Printf("ringbuffer: Write msgTypeID=0x%02x recordLen=%d index=%d tailPos=%d headBefore=%d srcLen=%d",
+		msgTypeID, recordLength, index, tailPos, headBefore, len(src))
 
 	return true
 }
@@ -112,6 +120,16 @@ func (rb *ManyToOneRingBuffer) NextCorrelationID() int64 {
 // ConsumerHeartbeatTime returns the consumer's last heartbeat timestamp.
 func (rb *ManyToOneRingBuffer) ConsumerHeartbeatTime() int64 {
 	return rb.buffer.GetInt64Volatile(rb.capacity + rbConsumerHeartbeatOff)
+}
+
+// HeadPosition returns the consumer's current head position.
+func (rb *ManyToOneRingBuffer) HeadPosition() int64 {
+	return rb.buffer.GetInt64Volatile(rb.capacity + rbHeadPositionOffset)
+}
+
+// TailPosition returns the producer's current tail position.
+func (rb *ManyToOneRingBuffer) TailPosition() int64 {
+	return rb.buffer.GetInt64Volatile(rb.capacity + rbTailPositionOffset)
 }
 
 func align(value, alignment int32) int32 {

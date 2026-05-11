@@ -159,10 +159,16 @@ func (c *Conductor) AddPublication(channel string, streamID int32) int64 {
 
 // AddSubscription requests a new subscription from the media driver.
 func (c *Conductor) AddSubscription(channel string, streamID int32) int64 {
+	rb := c.proxy.rb
+	headBefore := rb.HeadPosition()
+
 	corrID := c.proxy.AddSubscription(channel, streamID)
 	if corrID < 0 {
 		return corrID
 	}
+
+	log.Printf("conductor: AddSubscription corrID=%d channel=%q streamID=%d rbHead=%d->check",
+		corrID, channel, streamID, headBefore)
 
 	c.mu.Lock()
 	c.subscriptions[corrID] = &subscriptionState{
@@ -205,6 +211,10 @@ func (c *Conductor) DoWork() int {
 
 	now := time.Now().UnixNano()
 	if now-c.lastKeepaliveNs > c.keepaliveInterNs {
+		rbHead := c.proxy.rb.HeadPosition()
+		rbTail := c.proxy.rb.TailPosition()
+		log.Printf("conductor: keepalive tick rbHead=%d rbTail=%d pending=%d",
+			rbHead, rbTail, rbTail-rbHead)
 		c.proxy.SendClientKeepalive()
 		c.lastKeepaliveNs = now
 	}
