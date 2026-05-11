@@ -21,18 +21,18 @@ const (
 )
 
 // Response type IDs from the to-clients broadcast buffer.
-// These must match io.aeron.command.ControlProtocolEvents in the Java driver.
+// Must match io.aeron.command.ControlProtocolEvents exactly.
 const (
-	RespOnError                int32 = 0x0F03
-	RespOnAvailableImage       int32 = 0x0F04
-	RespOnPublication          int32 = 0x0F05
-	RespOnOperationSuccess     int32 = 0x0F06
-	RespOnUnavailableImage     int32 = 0x0F07
-	RespOnExclusivePublication int32 = 0x0F08
-	RespOnSubscription         int32 = 0x0F09
-	RespOnCounter              int32 = 0x0F0A
-	RespOnUnavailableCounter   int32 = 0x0F0B
-	RespOnClientTimeout        int32 = 0x0F0C
+	RespOnError                int32 = 0x0F01
+	RespOnAvailableImage       int32 = 0x0F02
+	RespOnPublication          int32 = 0x0F03
+	RespOnOperationSuccess     int32 = 0x0F04
+	RespOnUnavailableImage     int32 = 0x0F05
+	RespOnExclusivePublication int32 = 0x0F06
+	RespOnSubscription         int32 = 0x0F07
+	RespOnCounter              int32 = 0x0F08
+	RespOnUnavailableCounter   int32 = 0x0F09
+	RespOnClientTimeout        int32 = 0x0F0A
 )
 
 // Publication command message layout.
