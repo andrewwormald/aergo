@@ -31,17 +31,20 @@ const (
 	FlagEndFrag   = 0x40
 	FlagUnfrag    = FlagBeginFrag | FlagEndFrag
 
-	// Metadata offsets within the log metadata section
-	MetaTermTailCounterOff = 0 // 3 x int64 (packed: termID in high 32, offset in low 32)
-	MetaActiveTermCountOff = 24
-	MetaEndOfStreamOff     = 32 // int64
-	MetaIsConnectedOff     = 40 // int32
-	MetaCorrelationIDOff   = 48 // int64
-	MetaInitialTermIDOff   = 56 // int32
-	MetaDefaultHdrLenOff   = 60 // int32
-	MetaMtuLenOff          = 64 // int32
-	MetaTermLenOff         = 68 // int32
-	MetaPageSizeOff        = 72 // int32
+	// Metadata offsets within the log metadata section.
+	// Fields are padded to cache-line boundaries (PADDING_SIZE=64).
+	// Matches Java LogBufferDescriptor exactly.
+	MetaTermTailCounterOff = 0   // 3 x int64 (packed: termID in high 32, offset in low 32)
+	MetaActiveTermCountOff = 24  // int32
+	MetaEndOfStreamOff     = 128 // int64 (PADDING_SIZE * 2)
+	MetaIsConnectedOff     = 136 // int32
+	MetaActiveTransportOff = 140 // int32
+	MetaCorrelationIDOff   = 256 // int64 (PADDING_SIZE * 4)
+	MetaInitialTermIDOff   = 264 // int32
+	MetaDefaultHdrLenOff   = 268 // int32
+	MetaMtuLenOff          = 272 // int32
+	MetaTermLenOff         = 276 // int32
+	MetaPageSizeOff        = 280 // int32
 )
 
 // LogBuffers represents a memory-mapped log buffer file.
