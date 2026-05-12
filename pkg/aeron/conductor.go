@@ -255,8 +255,14 @@ func (c *Conductor) onDriverMessage(msgTypeID int32, buffer []byte, offset, leng
 		c.onAvailableImage(buffer[offset : offset+length])
 	case RespOnUnavailableImage:
 		c.onUnavailableImage(buffer[offset : offset+length])
+	case RespOnCounter:
+		log.Printf("conductor: counter ready (0x%04x)", msgTypeID)
+	case RespOnUnavailableCounter:
+		log.Printf("conductor: unavailable counter (0x%04x)", msgTypeID)
 	case RespOnOperationSuccess:
 		log.Printf("conductor: operation success (ignored)")
+	case RespOnClientTimeout:
+		log.Printf("conductor: client timeout (0x%04x)", msgTypeID)
 	default:
 		log.Printf("conductor: unknown msgTypeID=0x%04x", msgTypeID)
 	}

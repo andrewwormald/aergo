@@ -238,17 +238,20 @@ func (c *AeronCluster) awaitSubscriptionConnected() int {
 }
 
 func (c *AeronCluster) createIngressPublications() int {
+	log.Printf("aergo: creating ingress publications for %d members", len(c.cfg.Members))
 	c.ingressPubs = make([]*aeron.Publication, 0, len(c.cfg.Members))
 	for _, member := range c.cfg.Members {
 		uri := fmt.Sprintf("aeron:udp?endpoint=%s", member.Endpoint)
 		if c.cfg.IngressChannel != "" {
 			uri = c.cfg.IngressChannel
 		}
+		log.Printf("aergo: AddPublication uri=%q streamID=%d", uri, c.cfg.IngressStreamId)
 		pub, err := c.aeronClient.AddPublication(uri, c.cfg.IngressStreamId)
 		if err != nil {
 			log.Printf("aergo: failed to create ingress publication to member %d: %v", member.MemberId, err)
 			continue
 		}
+		log.Printf("aergo: publication created, sessionID=%d streamID=%d", pub.SessionID(), pub.StreamID())
 		c.ingressPubs = append(c.ingressPubs, pub)
 	}
 	if len(c.ingressPubs) == 0 {
