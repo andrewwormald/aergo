@@ -8,7 +8,7 @@ const (
 	CounterTypeIdOffset       = 4
 	CounterFreeDeadlineOffset = 8
 	CounterKeyOffset          = 16
-	CounterKeyRegIdOffset     = 8 // within key
+	CounterKeyRegIdOffset     = 0 // HeartbeatTimestamp.REGISTRATION_ID_OFFSET = 0
 	CounterLabelOffset        = 128
 	CounterFullLabelLength    = 384
 	CounterMetadataLength     = CounterLabelOffset + CounterFullLabelLength // 512
