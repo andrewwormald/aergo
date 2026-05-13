@@ -269,32 +269,33 @@ func (c *Conductor) onDriverMessage(msgTypeID int32, buffer []byte, offset, leng
 }
 
 func (c *Conductor) onNewPublication(msg []byte) {
-	if len(msg) < 32 {
+	if len(msg) < 36 {
+		log.Printf("conductor: onNewPublication too short: %d bytes", len(msg))
 		return
 	}
-	// Response layout:
-	//   offset 0:  correlationID     int64
-	//   offset 8:  registrationID    int64
-	//   offset 16: streamID          int32
-	//   offset 20: sessionID         int32
-	//   offset 24: posLimitCounterID int32
-	//   offset 28: channelStatusID   int32
-	//   offset 32: logFileLength     int32
-	//   offset 36: logFile           string
+	// Java PublicationBuffersReadyFlyweight layout:
+	//   offset 0:  correlationID              int64
+	//   offset 8:  registrationID             int64
+	//   offset 16: sessionID                  int32
+	//   offset 20: streamID                   int32
+	//   offset 24: publicationLimitCounterID  int32
+	//   offset 28: channelStatusIndicatorID   int32
+	//   offset 32: logFileLength              int32 (putStringAscii prefix)
+	//   offset 36: logFileName                ASCII bytes
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
 	regID := int64(binary.LittleEndian.Uint64(msg[8:]))
-	sessionID := int32(binary.LittleEndian.Uint32(msg[20:]))
+	sessionID := int32(binary.LittleEndian.Uint32(msg[16:]))
 	posLimitID := int32(binary.LittleEndian.Uint32(msg[24:]))
 	channelStatusID := int32(binary.LittleEndian.Uint32(msg[28:]))
+	logFileLen := int32(binary.LittleEndian.Uint32(msg[32:]))
 
-	logFileLen := int32(0)
 	logFile := ""
-	if len(msg) >= 36 {
-		logFileLen = int32(binary.LittleEndian.Uint32(msg[32:]))
-		if len(msg) >= 36+int(logFileLen) {
-			logFile = string(msg[36 : 36+logFileLen])
-		}
+	if logFileLen > 0 && len(msg) >= 36+int(logFileLen) {
+		logFile = string(msg[36 : 36+logFileLen])
 	}
+
+	log.Printf("conductor: PUB_READY corrID=%d regID=%d sessionID=%d posLimit=%d channelStatus=%d logFileLen=%d logFile=%q msgLen=%d",
+		corrID, regID, sessionID, posLimitID, channelStatusID, logFileLen, logFile, len(msg))
 
 	c.mu.Lock()
 	pub := c.publications[corrID]

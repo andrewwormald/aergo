@@ -18,8 +18,8 @@ func TestOnNewPublication(t *testing.T) {
 	msg := make([]byte, 64)
 	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))       // correlationID
 	binary.LittleEndian.PutUint64(msg[8:], uint64(100))          // registrationID
-	binary.LittleEndian.PutUint32(msg[16:], uint32(1))           // streamID
-	binary.LittleEndian.PutUint32(msg[20:], uint32(7))           // sessionID
+	binary.LittleEndian.PutUint32(msg[16:], uint32(7))           // sessionID
+	binary.LittleEndian.PutUint32(msg[20:], uint32(1))           // streamID
 	binary.LittleEndian.PutUint32(msg[24:], uint32(5))           // posLimitCounterID
 	binary.LittleEndian.PutUint32(msg[28:], uint32(3))           // channelStatusID
 	binary.LittleEndian.PutUint32(msg[32:], uint32(0))           // logFileLength = 0 (no file)
