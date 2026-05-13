@@ -2,6 +2,7 @@ package aeron
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -35,7 +36,25 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 		return nil, err
 	}
 
-	return &Aeron{conductor: conductor}, nil
+	a := &Aeron{conductor: conductor}
+
+	// Warmup: send keepalives until the driver allocates our heartbeat counter.
+	// This ensures the driver has registered our client before we send commands.
+	log.Printf("aeron: warming up (waiting for driver to register client)...")
+	warmupDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(warmupDeadline) {
+		conductor.DoWork()
+		if conductor.heartbeatCounterId >= 0 {
+			log.Printf("aeron: driver registered our client (heartbeat counter=%d)", conductor.heartbeatCounterId)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conductor.heartbeatCounterId < 0 {
+		log.Printf("aeron: warning: heartbeat counter not found after warmup")
+	}
+
+	return a, nil
 }
 
 // AddPublication creates a publication for the given channel and stream.
@@ -46,7 +65,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 	}
 
 	// Poll for the driver response
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -64,7 +83,7 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 		return nil, fmt.Errorf("add subscription failed")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindSubscription(corrID); state != nil {
