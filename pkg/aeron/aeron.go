@@ -36,25 +36,7 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 		return nil, err
 	}
 
-	a := &Aeron{conductor: conductor}
-
-	// Warmup: send keepalives until the driver allocates our heartbeat counter.
-	// This ensures the driver has registered our client before we send commands.
-	log.Printf("aeron: warming up (waiting for driver to register client)...")
-	warmupDeadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(warmupDeadline) {
-		conductor.DoWork()
-		if conductor.heartbeatCounterId >= 0 {
-			log.Printf("aeron: driver registered our client (heartbeat counter=%d)", conductor.heartbeatCounterId)
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if conductor.heartbeatCounterId < 0 {
-		log.Printf("aeron: warning: heartbeat counter not found after warmup")
-	}
-
-	return a, nil
+	return &Aeron{conductor: conductor}, nil
 }
 
 // AddPublication creates a publication for the given channel and stream.
@@ -64,11 +46,11 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 		return nil, fmt.Errorf("add publication failed")
 	}
 
-	// Poll for the driver response
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindPublication(corrID); state != nil {
+			c.tryFindHeartbeatCounter()
 			return newPublication(c.conductor, state), nil
 		}
 		time.Sleep(time.Millisecond)
@@ -87,11 +69,28 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindSubscription(corrID); state != nil {
+			c.tryFindHeartbeatCounter()
 			return newSubscription(c.conductor, corrID, state), nil
 		}
 		time.Sleep(time.Millisecond)
 	}
 	return nil, fmt.Errorf("subscription timeout")
+}
+
+// tryFindHeartbeatCounter searches for our heartbeat counter after the driver
+// has registered our client (triggered by the first successful command).
+func (c *Aeron) tryFindHeartbeatCounter() {
+	cond := c.conductor
+	if cond.heartbeatCounterId >= 0 {
+		return // already found
+	}
+	cond.heartbeatCounterId = FindHeartbeatCounter(
+		cond.cnc.CounterMetadata, cond.cnc.CounterValues, cond.clientID)
+	if cond.heartbeatCounterId >= 0 {
+		log.Printf("aeron: found heartbeat counter=%d for clientID=%d, updating immediately",
+			cond.heartbeatCounterId, cond.clientID)
+		UpdateHeartbeatCounter(cond.cnc.CounterValues, cond.heartbeatCounterId)
+	}
 }
 
 // DoWork processes driver responses. Call this periodically.
