@@ -1,9 +1,6 @@
 package aeron
 
-import (
-	"log"
-	"time"
-)
+import "time"
 
 // Counter metadata layout (per counter).
 const (
@@ -29,10 +26,6 @@ const (
 func FindHeartbeatCounter(metaBuf, valuesBuf *AtomicBuffer, clientID int64) int32 {
 	maxCounterId := (valuesBuf.Capacity() / CounterValueLength) - 1
 
-	scanned := 0
-	allocated := 0
-	typeMatches := 0
-
 	for counterId := int32(0); counterId <= maxCounterId; counterId++ {
 		metaOffset := counterId * CounterMetadataLength
 		if metaOffset+CounterMetadataLength > metaBuf.Capacity() {
@@ -43,37 +36,20 @@ func FindHeartbeatCounter(metaBuf, valuesBuf *AtomicBuffer, clientID int64) int3
 		if state == CounterRecordUnused {
 			break
 		}
-		scanned++
 		if state != CounterRecordAllocated {
 			continue
 		}
-		allocated++
 
 		typeId := metaBuf.GetInt32(metaOffset + CounterTypeIdOffset)
-		if typeId == HeartbeatTypeID {
-			typeMatches++
-			regId := metaBuf.GetInt64(metaOffset + CounterKeyOffset + CounterKeyRegIdOffset)
+		if typeId != HeartbeatTypeID {
+			continue
+		}
 
-			// Read label for diagnostics
-			labelLen := metaBuf.GetInt32(metaOffset + CounterLabelOffset)
-			label := ""
-			if labelLen > 0 && labelLen < 200 {
-				labelBytes := make([]byte, labelLen)
-				metaBuf.GetBytes(metaOffset+CounterLabelOffset+4, labelBytes)
-				label = string(labelBytes)
-			}
-
-			log.Printf("counters: heartbeat counter id=%d regId=%d (want %d) label=%q",
-				counterId, regId, clientID, label)
-
-			if regId == clientID {
-				return counterId
-			}
+		regId := metaBuf.GetInt64(metaOffset + CounterKeyOffset + CounterKeyRegIdOffset)
+		if regId == clientID {
+			return counterId
 		}
 	}
-
-	log.Printf("counters: scan complete: scanned=%d allocated=%d typeMatches=%d looking for clientID=%d",
-		scanned, allocated, typeMatches, clientID)
 	return -1
 }
 

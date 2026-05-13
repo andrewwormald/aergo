@@ -38,11 +38,8 @@ pkg/aeron/native    -- pure Go shared memory protocol
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
     |
-pkg/codec/sbe       -- zero-alloc SBE encoding primitives
-pkg/codec/cluster   -- Aeron cluster protocol messages (templates 1-8)
-    |
 pkg/cluster         -- Cluster interface + AeronCluster state machine
-                       auto-reconnect, graceful shutdown, challenge-response
+                       SBE codecs, auto-reconnect, graceful shutdown
 ```
 
 ## Key conventions

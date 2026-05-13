@@ -1,7 +1,5 @@
 package aeron
 
-import "log"
-
 // Broadcast buffer trailer layout (single-producer to multiple-consumers).
 // Matches agrona BroadcastBufferDescriptor: counters are packed at 8-byte
 // intervals, trailer is CACHE_LINE_LENGTH * 2 bytes.
@@ -13,8 +11,6 @@ const (
 )
 
 // BroadcastReceiver reads messages from the media driver's to-clients broadcast buffer.
-// The driver is the single producer; multiple clients consume independently.
-// If a client falls behind, it will detect lapping and skip to the latest message.
 type BroadcastReceiver struct {
 	buffer       *AtomicBuffer
 	capacity     int32
@@ -33,7 +29,6 @@ func NewBroadcastReceiver(buf *AtomicBuffer) *BroadcastReceiver {
 		capacity: capacity,
 		mask:     capacity - 1,
 	}
-	// Initialize to latest position
 	r.cursor = buf.GetInt64Volatile(capacity + bcLatestCounterOff)
 	r.nextRecord = r.cursor
 	return r
@@ -43,8 +38,6 @@ func NewBroadcastReceiver(buf *AtomicBuffer) *BroadcastReceiver {
 func (r *BroadcastReceiver) LappedCount() int64 { return r.lappedCount }
 
 // ReceiveNext advances to the next available message.
-// Returns true if a message is ready. Call MsgTypeID(), Offset(), Length()
-// to access the current message, then call Validate() after reading.
 func (r *BroadcastReceiver) ReceiveNext() bool {
 	for {
 		tail := r.buffer.GetInt64Volatile(r.capacity + bcTailCounterOff)
@@ -68,14 +61,10 @@ func (r *BroadcastReceiver) ReceiveNext() bool {
 		alignedLen := align(length, RecordAlignment)
 		msgTypeID := r.buffer.GetInt32(r.recordOffset + 4)
 
-		log.Printf("broadcast: ReceiveNext recordOffset=%d length=%d alignedLen=%d msgTypeID=0x%04x tail=%d nextRecord=%d cursor=%d",
-			r.recordOffset, length, alignedLen, uint32(msgTypeID), tail, r.nextRecord, r.cursor)
-
 		r.cursor = r.nextRecord
 		r.nextRecord += int64(alignedLen)
 
 		if msgTypeID == PaddingMsgTypeID {
-			log.Printf("broadcast: skipping padding at offset=%d, advancing to nextRecord=%d", r.recordOffset, r.nextRecord)
 			continue
 		}
 
@@ -98,8 +87,10 @@ func (r *BroadcastReceiver) Length() int32 {
 	return r.buffer.GetInt32(r.recordOffset) - RecordHeaderLength
 }
 
+// Buffer returns the underlying atomic buffer.
+func (r *BroadcastReceiver) Buffer() *AtomicBuffer { return r.buffer }
+
 // Validate checks if the current record hasn't been overwritten since reading.
-// Must be called after processing a message.
 func (r *BroadcastReceiver) Validate() bool {
 	return r.validate(r.cursor)
 }
@@ -109,12 +100,10 @@ func (r *BroadcastReceiver) validate(cursor int64) bool {
 	return (cursor + int64(r.capacity)) > tailIntent
 }
 
-// CopyBroadcastReceiver wraps a BroadcastReceiver and copies each message
-// to a scratch buffer, validating after copy to detect lapping.
+// CopyBroadcastReceiver copies each message to a scratch buffer before delivery.
 type CopyBroadcastReceiver struct {
 	receiver *BroadcastReceiver
 	scratch  []byte
-	debugLog func(msgTypeID, length, recordOffset int32)
 }
 
 // NewCopyBroadcastReceiver creates a copying broadcast receiver.
@@ -125,16 +114,10 @@ func NewCopyBroadcastReceiver(receiver *BroadcastReceiver) *CopyBroadcastReceive
 	}
 }
 
-// SetDebugLog sets a callback invoked for every delivered message, useful for diagnostics.
-func (cr *CopyBroadcastReceiver) SetDebugLog(fn func(msgTypeID, length, recordOffset int32)) {
-	cr.debugLog = fn
-}
-
 // MessageHandler is called for each broadcast message received.
 type MessageHandler func(msgTypeID int32, buffer []byte, offset, length int32)
 
 // Receive polls for messages, copying each to a scratch buffer.
-// Returns the number of messages received.
 func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int {
 	count := 0
 	r := cr.receiver
@@ -161,9 +144,6 @@ func (cr *CopyBroadcastReceiver) Receive(handler MessageHandler, limit int) int 
 		if r.Validate() {
 			msgTypeID := int32(cr.scratch[4]) | int32(cr.scratch[5])<<8 |
 				int32(cr.scratch[6])<<16 | int32(cr.scratch[7])<<24
-			if cr.debugLog != nil {
-				cr.debugLog(msgTypeID, length, recordOffset)
-			}
 			handler(msgTypeID, cr.scratch, RecordHeaderLength, length)
 			count++
 		}

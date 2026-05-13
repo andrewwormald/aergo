@@ -1,9 +1,6 @@
 package aeron
 
-import (
-	"log"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 // Publication wraps a log buffer for sending messages to a stream.
 type Publication struct {
@@ -16,7 +13,6 @@ type Publication struct {
 	initialTermID  int32
 	posLimit       int32
 	closed         atomic.Bool
-	loggedMetaDiag bool
 }
 
 func newPublication(conductor *Conductor, state *publicationState) *Publication {
@@ -35,11 +31,6 @@ func newPublication(conductor *Conductor, state *publicationState) *Publication 
 }
 
 // Offer sends a message to the publication's stream.
-// Returns the new stream position (>0), or a negative error code:
-//
-//	-1 = NOT_CONNECTED
-//	-2 = BACK_PRESSURED (term full, caller should retry)
-//	-4 = CLOSED
 func (p *Publication) Offer(buf []byte) int64 {
 	if p.closed.Load() || p.logBuffers == nil {
 		return -4
@@ -57,17 +48,15 @@ func (p *Publication) Offer(buf []byte) int64 {
 	frameLen := int32(DataFrameHeaderLen + len(buf))
 	alignedLen := align(frameLen, DataFrameHeaderLen)
 
-	// Claim space atomically
 	tailOff := int32(MetaTermTailCounterOff + partIndex*8)
 	rawTail := p.logBuffers.Meta().GetAndAddInt64(tailOff, int64(alignedLen))
-	termOffset := int32(rawTail) // low 32 bits
+	termOffset := int32(rawTail)
 
 	if termOffset+alignedLen > termLen {
-		return -2 // term full -- media driver handles rotation
+		return -2
 	}
 
-	// Write data frame header
-	term.PutInt32(termOffset+FrameLengthOffset, 0) // uncommitted
+	term.PutInt32(termOffset+FrameLengthOffset, 0)
 	term.PutUint8(termOffset+FrameVersionOffset, 0)
 	term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
 	term.PutInt32(termOffset+FrameTypeOffset, FrameTypeData)
@@ -75,11 +64,7 @@ func (p *Publication) Offer(buf []byte) int64 {
 	term.PutInt32(termOffset+FrameSessionIDOff, p.sessionID)
 	term.PutInt32(termOffset+FrameStreamIDOff, p.streamID)
 	term.PutInt32(termOffset+FrameTermIDOff, termID)
-
-	// Write payload
 	term.PutBytes(termOffset+DataFrameHeaderLen, buf)
-
-	// Commit: ordered store makes payload visible to readers
 	term.PutInt32Ordered(termOffset+FrameLengthOffset, frameLen)
 
 	return computePosition(termID, termOffset+alignedLen, termLen, p.initialTermID)
@@ -92,28 +77,13 @@ func (p *Publication) OfferWithRetry(buf []byte, maxRetries int) int64 {
 		if result > 0 || result == -1 || result == -4 {
 			return result
 		}
-		// -2 = back pressure, retry
 	}
 	return -2
 }
 
 // IsConnected returns whether the publication has active subscribers.
 func (p *Publication) IsConnected() bool {
-	if p.logBuffers == nil {
-		return false
-	}
-	meta := p.logBuffers.Meta()
-	raw := meta.GetInt32Volatile(MetaIsConnectedOff)
-	if raw != 0 && raw != 1 {
-		// Log once if we see an unexpected value (metadata offset likely wrong)
-		if !p.loggedMetaDiag {
-			p.loggedMetaDiag = true
-			log.Printf("pub: IsConnected raw=%d at offset=%d, meta capacity=%d, termLen=%d, fileSize=%d+%d",
-				raw, MetaIsConnectedOff, meta.Capacity(), p.logBuffers.TermLength(),
-				int64(p.logBuffers.TermLength())*PartitionCount, LogMetaDataLength)
-		}
-	}
-	return raw == 1
+	return p.logBuffers != nil && p.logBuffers.IsConnected()
 }
 
 // StreamID returns the stream identifier.

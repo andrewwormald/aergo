@@ -1,9 +1,6 @@
 package aeron
 
-import (
-	"errors"
-	"log"
-)
+import "errors"
 
 // Ring buffer record header layout.
 const (
@@ -30,7 +27,6 @@ type ManyToOneRingBuffer struct {
 }
 
 // NewManyToOneRingBuffer wraps a buffer as an MPSC ring buffer.
-// The buffer capacity (excluding trailer) must be a power of two.
 func NewManyToOneRingBuffer(buf *AtomicBuffer) (*ManyToOneRingBuffer, error) {
 	capacity := buf.Capacity() - int32(rbTrailerLength)
 	if capacity <= 0 || !isPowerOfTwo(int(capacity)) {
@@ -40,12 +36,9 @@ func NewManyToOneRingBuffer(buf *AtomicBuffer) (*ManyToOneRingBuffer, error) {
 }
 
 // Write writes a message to the ring buffer.
-// Returns true if successful, false if insufficient capacity.
 func (rb *ManyToOneRingBuffer) Write(msgTypeID int32, src []byte) bool {
 	recordLength := int32(RecordHeaderLength + len(src))
 	alignedLength := align(recordLength, RecordAlignment)
-
-	headBefore := rb.buffer.GetInt64Volatile(rb.capacity + rbHeadPositionOffset)
 
 	tailPos, ok := rb.claimCapacity(alignedLength)
 	if !ok {
@@ -54,23 +47,14 @@ func (rb *ManyToOneRingBuffer) Write(msgTypeID int32, src []byte) bool {
 
 	index := tailPos & (rb.capacity - 1)
 
-	// Write record: match Java Agrona ManyToOneRingBuffer.write ordering.
-	// 1. Set length negative (uncommitted)
 	rb.buffer.PutInt32Ordered(index, -recordLength)
-	// 2. Write payload
 	rb.buffer.PutBytes(index+RecordHeaderLength, src)
-	// 3. Write type ID
 	rb.buffer.PutInt32(index+4, msgTypeID)
-	// 4. Commit: set length positive (ordered store makes record visible)
 	rb.buffer.PutInt32Ordered(index, recordLength)
-
-	log.Printf("ringbuffer: Write msgTypeID=0x%02x recordLen=%d index=%d tailPos=%d headBefore=%d srcLen=%d",
-		msgTypeID, recordLength, index, tailPos, headBefore, len(src))
 
 	return true
 }
 
-// claimCapacity atomically claims space in the ring buffer.
 func (rb *ManyToOneRingBuffer) claimCapacity(required int32) (int32, bool) {
 	mask := rb.capacity - 1
 	headCacheOff := rb.capacity + rbHeadCachePositionOff
@@ -82,7 +66,6 @@ func (rb *ManyToOneRingBuffer) claimCapacity(required int32) (int32, bool) {
 		available := rb.capacity - int32(tail-head)
 
 		if required > available {
-			// Refresh head cache
 			head = rb.buffer.GetInt64Volatile(rb.capacity + rbHeadPositionOffset)
 			rb.buffer.PutInt64Ordered(headCacheOff, head)
 			available = rb.capacity - int32(tail-head)
@@ -95,9 +78,9 @@ func (rb *ManyToOneRingBuffer) claimCapacity(required int32) (int32, bool) {
 		padding := rb.capacity - tailIndex
 
 		if required > padding {
-			// Need to wrap: write padding record and retry
 			if rb.buffer.CompareAndSetInt64(tailOff, tail, tail+int64(padding)) {
-				rb.buffer.PutInt32(tailIndex, -padding)
+				rb.buffer.PutInt32Ordered(tailIndex, -padding)
+				rb.buffer.PutBytes(tailIndex+RecordHeaderLength, nil)
 				rb.buffer.PutInt32(tailIndex+4, PaddingMsgTypeID)
 				rb.buffer.PutInt32Ordered(tailIndex, padding)
 				continue
