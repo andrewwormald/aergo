@@ -10,7 +10,7 @@ import (
 // Log buffer constants.
 const (
 	PartitionCount       = 3
-	LogMetaDataLength    = 64 * 1024 // 64KB for metadata section
+	LogMetaDataLength    = 4 * 1024 // PAGE_MIN_SIZE (Java LogBufferDescriptor)
 	DataFrameHeaderLen   = 32        // aeron_data_header_t
 	FrameLengthOffset    = 0
 	FrameVersionOffset   = 4
