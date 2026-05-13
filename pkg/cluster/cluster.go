@@ -41,7 +41,7 @@ const (
 const (
 	DefaultIngressStreamId     = 101
 	DefaultEgressStreamId      = 102
-	DefaultEgressChannel       = "aeron:udp?endpoint=localhost:0"
+	DefaultEgressChannel       = "aeron:udp?endpoint=localhost:19876"
 	DefaultKeepAliveIntervalMs = 1000
 	DefaultConnectTimeoutMs    = 5000
 	DefaultReconnectBackoffMs  = 1000
