@@ -1,6 +1,9 @@
 package aeron
 
-import "sync/atomic"
+import (
+	"log"
+	"sync/atomic"
+)
 
 // Publication wraps a log buffer for sending messages to a stream.
 type Publication struct {
@@ -13,6 +16,7 @@ type Publication struct {
 	initialTermID  int32
 	posLimit       int32
 	closed         atomic.Bool
+	loggedMetaDiag bool
 }
 
 func newPublication(conductor *Conductor, state *publicationState) *Publication {
@@ -95,7 +99,21 @@ func (p *Publication) OfferWithRetry(buf []byte, maxRetries int) int64 {
 
 // IsConnected returns whether the publication has active subscribers.
 func (p *Publication) IsConnected() bool {
-	return p.logBuffers != nil && p.logBuffers.IsConnected()
+	if p.logBuffers == nil {
+		return false
+	}
+	meta := p.logBuffers.Meta()
+	raw := meta.GetInt32Volatile(MetaIsConnectedOff)
+	if raw != 0 && raw != 1 {
+		// Log once if we see an unexpected value (metadata offset likely wrong)
+		if !p.loggedMetaDiag {
+			p.loggedMetaDiag = true
+			log.Printf("pub: IsConnected raw=%d at offset=%d, meta capacity=%d, termLen=%d, fileSize=%d+%d",
+				raw, MetaIsConnectedOff, meta.Capacity(), p.logBuffers.TermLength(),
+				int64(p.logBuffers.TermLength())*PartitionCount, LogMetaDataLength)
+		}
+	}
+	return raw == 1
 }
 
 // StreamID returns the stream identifier.
