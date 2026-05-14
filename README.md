@@ -18,7 +18,7 @@ Pure Go [Aeron](https://github.com/aeron-io/aeron) cluster client. Communicates 
 
 ```go
 import (
-    aeron "github.com/andrewwormald/aergo/pkg/aeron/native"
+    aeron "github.com/andrewwormald/aergo/pkg/aeron"
     "github.com/andrewwormald/aergo/pkg/cluster"
 )
 
@@ -50,7 +50,7 @@ The media driver (`aeronmd`) must be running before connecting. Build it from th
 ```
 syscall.Mmap(cnc.dat)
     |
-pkg/aeron/native    -- pure Go shared memory protocol
+pkg/aeron           -- pure Go shared memory protocol
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription

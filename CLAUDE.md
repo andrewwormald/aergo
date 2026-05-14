@@ -19,7 +19,7 @@ go build ./...
 ./build/aeron/bin/aeronmd
 
 # Cluster connect
-go run ./cmd/aergo -dir /tmp/aeron-<user> -endpoint localhost:10003
+go run ./cmd/aergo -dir /tmp/aeron-<user> -endpoint localhost:10000
 ```
 
 ## Test
@@ -33,7 +33,7 @@ go test ./...
 ```
 syscall.Mmap(cnc.dat)
     |
-pkg/aeron/native    -- pure Go shared memory protocol
+pkg/aeron           -- pure Go shared memory protocol
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
@@ -48,4 +48,3 @@ pkg/cluster         -- Cluster interface + AeronCluster state machine
 - Aeron-idiomatic naming: `Aeron`, `Connect`, `Context`, `Publication`, `Subscription`, `Image`, `FragmentHandler`, `Conductor`
 - Zero external dependencies -- pure Go standard library only
 - All shared memory access via `sync/atomic` and `unsafe.Pointer` on mmap'd files
-- `ROADMAP.md` tracks tradeoffs and tech debt
