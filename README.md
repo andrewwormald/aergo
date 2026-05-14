@@ -1,4 +1,10 @@
-# Aergo
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+    <img alt="aergo" src="assets/logo-light.svg" width="320">
+  </picture>
+</p>
 
 Pure Go [Aeron](https://github.com/aeron-io/aeron) cluster client. Communicates with the Aeron media driver via shared memory -- no C library, no CGO, zero external dependencies.
 
