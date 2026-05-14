@@ -6,7 +6,9 @@
   </picture>
 </p>
 
-Pure Go [Aeron](https://github.com/aeron-io/aeron) cluster client. Communicates with the Aeron media driver via shared memory -- no C library, no CGO, zero external dependencies.
+<p align="center"><em>Zero-dependency, pure Go <a href="https://github.com/aeron-io/aeron">Aeron</a> cluster client. No CGO. No C library.</em></p>
+
+Built for low-latency Go services that need Aeron's shared-memory transport without inheriting a C toolchain. Talks to the media driver directly over mmap'd shared memory using only the Go standard library -- no third-party Go modules, no `import "C"`, no linker flags.
 
 ## Features
 
