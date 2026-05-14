@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 150" role="img" aria-label="aergo">
+  <title>aergo</title>
+  <rect x="10" y="2" width="400" height="6" fill="#F2EEE5"/>
+  <rect x="10" y="142" width="400" height="6" fill="#F2EEE5"/>
+  <text x="24" y="110"
+        font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="104" font-weight="700"
+        textLength="282" lengthAdjust="spacingAndGlyphs"
+        fill="#F2EEE5">aer<tspan fill="#5DC9E2">go</tspan></text>
+  <rect x="318" y="56" width="74" height="9" rx="4" fill="#5DC9E2"/>
+  <rect x="318" y="84" width="48" height="9" rx="4" fill="#5DC9E2"/>
+</svg>
