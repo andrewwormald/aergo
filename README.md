@@ -26,7 +26,7 @@ Built for low-latency Go services that need Aeron's shared-memory transport with
 
 ```go
 import (
-    aeron "github.com/andrewwormald/aergo/pkg/aeron"
+    "github.com/andrewwormald/aergo/pkg/aeron"
     "github.com/andrewwormald/aergo/pkg/cluster"
 )
 
@@ -46,11 +46,15 @@ sub.Poll(func(buffer []byte, header *aeron.Header) {
 
 ## Building the Media Driver
 
-The media driver (`aeronmd`) must be running before connecting. Build it from the Aeron C source:
+`aergo` is a client -- it talks to a running `aeronmd` process via shared memory. The media driver itself is the upstream Aeron C/C++ build; this repo does not bundle a build script. Follow the upstream build instructions:
+
+- <https://github.com/aeron-io/aeron> (`cppbuild/cppbuild` or `cmake` directly)
+
+Once built, launch the driver and point `aergo` at the same directory:
 
 ```bash
-./scripts/build-aeron.sh
-./build/aeron/bin/aeronmd
+aeronmd                                       # defaults to /dev/shm/aeron-<user>
+go run ./cmd/aergo -dir /dev/shm/aeron-<user> # use the same path
 ```
 
 ## Architecture
@@ -76,14 +80,15 @@ CnC File (cnc.dat)
 ├── To-Driver Buffer    → ManyToOneRingBuffer (send commands)
 ├── To-Clients Buffer   → BroadcastReceiver (receive responses)
 ├── Counter Values      → AtomicBuffer (heartbeat, positions)
-└── Counter Metadata    → counter definitions
+├── Counter Metadata    → counter definitions
+└── Error Log Buffer    → AtomicBuffer (driver error reports)
 
 Log Buffer Files (per publication/subscription)
 ├── Term 0, 1, 2       → TermAppender (write) / TermReader (read)
 └── Metadata            → tail positions, connection status
 ```
 
-All operations use lock-free atomic operations (`sync/atomic`) on memory-mapped files. No locks on the hot path.
+Data-plane reads and writes use `sync/atomic` directly on the mmap'd shared memory. `Publication.Offer` is fully lock-free; `Subscription.Poll` takes a brief `sync.Mutex` only to snapshot the image set published by the conductor, then iterates and reads from each term buffer lock-free.
 
 ## Tests
 
