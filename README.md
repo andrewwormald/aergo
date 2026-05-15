@@ -19,7 +19,7 @@ Built for low-latency Go services that need Aeron's shared-memory transport with
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - A running Aeron media driver (`aeronmd`)
 
 ## Quick Start
