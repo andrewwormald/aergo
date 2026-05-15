@@ -1,0 +1,39 @@
+go test -bench=. -benchmem -benchtime=1s -count=1 -run=^$ ./pkg/aeron/... ./pkg/cluster/...
+goos: darwin
+goarch: arm64
+pkg: github.com/andrewwormald/aergo/pkg/aeron
+cpu: Apple M4 Pro
+BenchmarkAtomicBufferPutInt32-14              	1000000000	         0.2426 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferPutInt64-14              	1000000000	         0.2374 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferPutBytes-14              	1000000000	         0.6037 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferPutInt32Ordered-14       	1000000000	         0.2399 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferPutInt64Ordered-14       	1000000000	         0.2391 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferGetAndAddInt64-14        	681949437	         1.687 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferCompareAndSetInt64-14    	1000000000	         0.8086 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAtomicBufferGetInt32Volatile-14      	1000000000	         0.2781 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBroadcastReceiveNext-14              	520953922	         2.286 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCopyBroadcastReceive-14              	 3449275	       348.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEndToEndSendReceive/payload=32-14    	14977648	        80.13 ns/op	 798.67 MB/s	     144 B/op	       3 allocs/op
+BenchmarkEndToEndSendReceive/payload=256-14   	10302517	       115.2 ns/op	2500.69 MB/s	     368 B/op	       3 allocs/op
+BenchmarkEndToEndSendReceive/payload=1024-14  	 5919962	       196.9 ns/op	5364.23 MB/s	    1232 B/op	       3 allocs/op
+BenchmarkTermAppenderAppend-14                	229471790	         5.206 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReadTerm-14                          	  439934	      2673 ns/op	    8192 B/op	     256 allocs/op
+BenchmarkPublicationOffer/payload=32-14       	100000000	        10.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublicationOffer/payload=256-14      	88623280	        13.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublicationOffer/payload=1024-14     	41377042	        29.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRingBufferWrite/payload=32-14        	259803068	         4.663 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRingBufferWrite/payload=256-14       	135631897	         8.840 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRingBufferWrite/payload=1024-14      	48352770	        24.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSubscriptionPoll-14                  	  264864	      4475 ns/op	   14336 B/op	     384 allocs/op
+PASS
+ok  	github.com/andrewwormald/aergo/pkg/aeron	106.501s
+goos: darwin
+goarch: arm64
+pkg: github.com/andrewwormald/aergo/pkg/cluster
+cpu: Apple M4 Pro
+BenchmarkSessionMessageHeaderEncode-14    	438715284	         2.685 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSessionMessageHeaderDecode-14    	1000000000	         0.2306 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMessageHeaderEncode-14           	1000000000	         0.2345 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMessageHeaderDecode-14           	1000000000	         0.2291 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/andrewwormald/aergo/pkg/cluster	2.471s
