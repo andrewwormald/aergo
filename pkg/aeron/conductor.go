@@ -304,28 +304,29 @@ func (c *Conductor) onSubscriptionReady(msg []byte) {
 }
 
 func (c *Conductor) onAvailableImage(msg []byte) {
-	if len(msg) < 40 {
+	if len(msg) < 32 {
 		return
 	}
-	// Response layout:
-	//   offset 0:  correlationID       int64
-	//   offset 8:  sessionID           int32
-	//   offset 12: subscriberPosID     int32
-	//   offset 16: subscriptionRegID   int64
-	//   offset 24: joinPosition        int64
-	//   offset 32: logFileLength       int32
-	//   offset 36: logFile             string
-	//   after logFile: sourceIdentityLength int32 + sourceIdentity string
+	// Response layout (matches io.aeron.command.ImageBuffersReadyFlyweight):
+	//   offset 0:  correlationID                int64
+	//   offset 8:  sessionID                    int32
+	//   offset 12: streamID                     int32
+	//   offset 16: subscriptionRegistrationID   int64
+	//   offset 24: subscriberPositionID         int32
+	//   offset 28: logFileName length           int32
+	//   offset 32: logFileName bytes            ASCII
+	//   after logFile (aligned to int): sourceIdentity length int32 + bytes
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
 	sessionID := int32(binary.LittleEndian.Uint32(msg[8:]))
-	subPosID := int32(binary.LittleEndian.Uint32(msg[12:]))
+	// streamID at offset 12 — not currently needed
 	subRegID := int64(binary.LittleEndian.Uint64(msg[16:]))
-	joinPos := int64(binary.LittleEndian.Uint64(msg[24:]))
-	logFileLen := int32(binary.LittleEndian.Uint32(msg[32:]))
+	subPosID := int32(binary.LittleEndian.Uint32(msg[24:]))
+	logFileLen := int32(binary.LittleEndian.Uint32(msg[28:]))
 	logFile := ""
-	if len(msg) >= 36+int(logFileLen) {
-		logFile = string(msg[36 : 36+logFileLen])
+	if len(msg) >= 32+int(logFileLen) {
+		logFile = string(msg[32 : 32+logFileLen])
 	}
+	joinPos := int64(0)
 	_ = corrID
 
 	lb, err := MapLogBuffers(logFile)
