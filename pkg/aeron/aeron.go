@@ -14,9 +14,21 @@ type Aeron struct {
 }
 
 // publicationWaitTimeout is the deadline AddPublication and
-// AddExclusivePublication wait for the driver response. Test code may
-// override this to keep tests fast.
+// AddExclusivePublication wait for a driver response before giving up.
+// Mutate only via PublicationWaitTimeoutForTesting.
 var publicationWaitTimeout = 15 * time.Second
+
+// PublicationWaitTimeoutForTesting overrides the wait deadline used by
+// AddPublication and AddExclusivePublication when waiting for the
+// driver's response. Returns the previous value so the caller can
+// restore it (typically via t.Cleanup).
+//
+// Test-only — keep production code on the default 15 s.
+func PublicationWaitTimeoutForTesting(d time.Duration) time.Duration {
+	prev := publicationWaitTimeout
+	publicationWaitTimeout = d
+	return prev
+}
 
 // Option configures the Aeron client.
 type ContextOption func(*Context)
