@@ -13,6 +13,11 @@ type Aeron struct {
 	closed    bool
 }
 
+// publicationWaitTimeout is the deadline AddPublication and
+// AddExclusivePublication wait for the driver response. Test code may
+// override this to keep tests fast.
+var publicationWaitTimeout = 15 * time.Second
+
 // Option configures the Aeron client.
 type ContextOption func(*Context)
 
@@ -46,7 +51,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 		return nil, fmt.Errorf("add publication failed")
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(publicationWaitTimeout)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -72,7 +77,7 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 		return nil, fmt.Errorf("add exclusive publication failed")
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(publicationWaitTimeout)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if state := c.conductor.FindPublication(corrID); state != nil {

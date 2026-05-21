@@ -183,6 +183,93 @@ func TestOnUnavailableImage(t *testing.T) {
 	}
 }
 
+// TestConductorAddPublication verifies the shared path adds an entry to
+// publications, returns a positive correlation ID, and routes through
+// CmdAddPublication (sanity-check before the exclusive variant test).
+func TestConductorAddPublication(t *testing.T) {
+	rb := newTestRingBuffer(4096)
+	c := &Conductor{
+		proxy:         NewDriverProxy(rb, 42),
+		publications:  make(map[int64]*publicationState),
+		subscriptions: make(map[int64]*subscriptionState),
+	}
+
+	corrID := c.AddPublication("aeron:ipc", 101)
+	if corrID < 0 {
+		t.Fatalf("AddPublication returned %d", corrID)
+	}
+
+	c.mu.Lock()
+	state, ok := c.publications[corrID]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatalf("publications map missing entry for corrID=%d", corrID)
+	}
+	if state.channel != "aeron:ipc" || state.streamID != 101 {
+		t.Errorf("publication state wrong: channel=%q streamID=%d", state.channel, state.streamID)
+	}
+
+	// Verify the command that was written to the ring buffer was
+	// CmdAddPublication, not CmdAddExclusivePublication.
+	if cmd := peekFirstCommandType(t, rb); cmd != CmdAddPublication {
+		t.Errorf("expected CmdAddPublication (0x%x), got 0x%x", CmdAddPublication, cmd)
+	}
+}
+
+// TestConductorAddExclusivePublication verifies the exclusive variant
+// adds an entry to the same publications map (so the response handler in
+// the RespOnPublication / RespOnExclusivePublication branch can find it)
+// and that the underlying driver command is CmdAddExclusivePublication
+// rather than CmdAddPublication.
+func TestConductorAddExclusivePublication(t *testing.T) {
+	rb := newTestRingBuffer(4096)
+	c := &Conductor{
+		proxy:         NewDriverProxy(rb, 42),
+		publications:  make(map[int64]*publicationState),
+		subscriptions: make(map[int64]*subscriptionState),
+	}
+
+	corrID := c.AddExclusivePublication("aeron:ipc?term-length=128k", 102)
+	if corrID < 0 {
+		t.Fatalf("AddExclusivePublication returned %d", corrID)
+	}
+
+	c.mu.Lock()
+	state, ok := c.publications[corrID]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatalf("publications map missing entry for corrID=%d", corrID)
+	}
+	if state.channel != "aeron:ipc?term-length=128k" || state.streamID != 102 {
+		t.Errorf("publication state wrong: channel=%q streamID=%d", state.channel, state.streamID)
+	}
+
+	if cmd := peekFirstCommandType(t, rb); cmd != CmdAddExclusivePublication {
+		t.Errorf("expected CmdAddExclusivePublication (0x%x), got 0x%x",
+			CmdAddExclusivePublication, cmd)
+	}
+}
+
+// Aeron.AddExclusivePublication wraps Conductor.AddExclusivePublication
+// + Conductor.DoWork polling. DoWork dereferences the broadcast
+// receiver, so any meaningful unit test needs a live media driver to
+// stand it up. The wrapper is consequently covered by integration
+// (loadtester end-to-end) the same way Aeron.AddPublication is — see
+// TestConductorAddExclusivePublication for the deepest unit coverage of
+// the new code path.
+
+// peekFirstCommandType reads the msgTypeID field of the first record in
+// the ring buffer. Used to assert the right driver command was sent.
+// The ring-buffer record layout is [int32 recordLength][int32 msgTypeID][bytes],
+// so msgTypeID lives at offset 4 of the buffer's data area (index 0).
+func peekFirstCommandType(t *testing.T, rb *ManyToOneRingBuffer) int32 {
+	t.Helper()
+	if rb.buffer.GetInt32(0) <= 0 {
+		t.Fatal("ring buffer was empty — no command written")
+	}
+	return rb.buffer.GetInt32(4)
+}
+
 func TestOnNewPublicationShortMessage(t *testing.T) {
 	c := &Conductor{
 		publications:  make(map[int64]*publicationState),
