@@ -58,6 +58,32 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 	return nil, fmt.Errorf("publication timeout")
 }
 
+// AddExclusivePublication creates an exclusive publication for the given
+// channel and stream. The returned publication has a private log buffer,
+// so its term position is not contended with other publishers on the same
+// channel/stream — required to get the same throughput as the standard
+// Aeron Cluster Java client which uses exclusive ingress publications.
+//
+// On the driver side this is a different command (CmdAddExclusivePublication)
+// but the response and Publication type are identical to AddPublication.
+func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
+	corrID := c.conductor.AddExclusivePublication(channel, streamID)
+	if corrID < 0 {
+		return nil, fmt.Errorf("add exclusive publication failed")
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		c.conductor.DoWork()
+		if state := c.conductor.FindPublication(corrID); state != nil {
+			c.tryFindHeartbeatCounter()
+			return newPublication(c.conductor, state), nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return nil, fmt.Errorf("exclusive publication timeout")
+}
+
 // AddSubscription creates a subscription for the given channel and stream.
 func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, error) {
 	corrID := c.conductor.AddSubscription(channel, streamID)
