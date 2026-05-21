@@ -154,6 +154,30 @@ func (c *Conductor) AddPublication(channel string, streamID int32) int64 {
 	return corrID
 }
 
+// AddExclusivePublication requests a new exclusive publication from the
+// media driver. Exclusive publications give the caller their own private
+// log buffer (not shared with other publishers on the same channel/stream),
+// which unlocks higher single-publisher throughput because the term
+// position is uncontended. The response path is the same as a shared
+// publication (the driver responds with RespOnExclusivePublication, which
+// the conductor handles identically).
+func (c *Conductor) AddExclusivePublication(channel string, streamID int32) int64 {
+	corrID := c.proxy.AddExclusivePublication(channel, streamID)
+	if corrID < 0 {
+		return corrID
+	}
+
+	c.mu.Lock()
+	c.publications[corrID] = &publicationState{
+		correlationID: corrID,
+		channel:       channel,
+		streamID:      streamID,
+	}
+	c.mu.Unlock()
+
+	return corrID
+}
+
 // AddSubscription requests a new subscription from the media driver.
 func (c *Conductor) AddSubscription(channel string, streamID int32) int64 {
 	corrID := c.proxy.AddSubscription(channel, streamID)
