@@ -3,8 +3,6 @@ package cluster
 import (
 	"bytes"
 	"testing"
-
-	
 )
 
 func TestSessionMessageHeaderRoundTrip(t *testing.T) {

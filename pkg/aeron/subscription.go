@@ -93,7 +93,9 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 			handler(payload, h)
 		}, remaining)
 
-		if fragments > 0 {
+		// Advance even when only padding was consumed (fragments == 0 but
+		// the offset moved) so the reader can cross a term boundary.
+		if newOffset > termOffset {
 			img.subscriberPosition = computePosition(termID, newOffset, termLen, initialTermID)
 		}
 

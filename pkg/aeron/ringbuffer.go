@@ -11,12 +11,12 @@ const (
 
 // Ring buffer trailer layout (cache-line aligned offsets from end of buffer).
 const (
-	rbTrailerLength          = 12 * CacheLineLength
-	rbTailPositionOffset     = int32(2 * CacheLineLength)
-	rbHeadCachePositionOff   = int32(4 * CacheLineLength)
-	rbHeadPositionOffset     = int32(6 * CacheLineLength)
-	rbCorrelationCounterOff  = int32(8 * CacheLineLength)
-	rbConsumerHeartbeatOff   = int32(10 * CacheLineLength)
+	rbTrailerLength         = 12 * CacheLineLength
+	rbTailPositionOffset    = int32(2 * CacheLineLength)
+	rbHeadCachePositionOff  = int32(4 * CacheLineLength)
+	rbHeadPositionOffset    = int32(6 * CacheLineLength)
+	rbCorrelationCounterOff = int32(8 * CacheLineLength)
+	rbConsumerHeartbeatOff  = int32(10 * CacheLineLength)
 )
 
 // ManyToOneRingBuffer is a multiple-producer, single-consumer ring buffer
