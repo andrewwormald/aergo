@@ -1,6 +1,7 @@
 package aeron
 
 import (
+	"math"
 	"unsafe"
 )
 
@@ -22,6 +23,16 @@ func newInMemLogBuffers(termLen int32) *LogBuffers {
 	lb.meta.PutInt32(MetaTermLenOff, termLen)
 	lb.meta.PutInt32(MetaInitialTermIDOff, 0)
 	lb.meta.PutInt32Ordered(MetaIsConnectedOff, 1)
+
+	// Initialise the tail counters the way the media driver does: partition 0
+	// carries the initial termID; the others carry the stale termID expected
+	// by rotateLog (initialTermID + i - PartitionCount).
+	const initialTermID = int32(0)
+	for i := 1; i < PartitionCount; i++ {
+		expectedTermID := initialTermID + int32(i) - PartitionCount
+		lb.meta.PutInt64Ordered(int32(MetaTermTailCounterOff+i*8), packTail(expectedTermID, 0))
+	}
+	lb.meta.PutInt64Ordered(MetaTermTailCounterOff, packTail(initialTermID, 0))
 
 	// Keep backing slice alive for the lifetime of the LogBuffers by stashing
 	// it on the (unused-by-tests) data field via a parallel reference.
@@ -50,14 +61,25 @@ func zeroTerm(lb *LogBuffers, partIndex int, n int32) {
 
 // newInMemPublication builds a Publication that writes into the supplied
 // in-memory LogBuffers. The conductor is left nil — Offer never touches it.
+// A single-counter values buffer stubs the driver's publication-limit
+// counter; the limit defaults to unbounded (use setInMemPosLimit to change).
 func newInMemPublication(lb *LogBuffers, sessionID, streamID int32) *Publication {
+	counterValues := NewAtomicBuffer(make([]byte, CounterValueLength))
+	counterValues.PutInt64Ordered(0, math.MaxInt64)
 	return &Publication{
-		channel:       "aeron:ipc",
-		streamID:      streamID,
-		sessionID:     sessionID,
-		logBuffers:    lb,
-		initialTermID: lb.InitialTermID(),
+		channel:           "aeron:ipc",
+		streamID:          streamID,
+		sessionID:         sessionID,
+		logBuffers:        lb,
+		initialTermID:     lb.InitialTermID(),
+		posLimitCounterID: 0,
+		counterValues:     counterValues,
 	}
+}
+
+// setInMemPosLimit sets the stubbed publication-limit counter value.
+func setInMemPosLimit(pub *Publication, limit int64) {
+	pub.counterValues.PutInt64Ordered(pub.posLimitCounterID*CounterValueLength, limit)
 }
 
 // newInMemSubscription builds a Subscription with a single ready Image

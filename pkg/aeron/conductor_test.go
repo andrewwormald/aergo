@@ -16,13 +16,13 @@ func TestOnNewPublication(t *testing.T) {
 
 	// Simulate driver response
 	msg := make([]byte, 64)
-	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))       // correlationID
-	binary.LittleEndian.PutUint64(msg[8:], uint64(100))          // registrationID
-	binary.LittleEndian.PutUint32(msg[16:], uint32(7))           // sessionID
-	binary.LittleEndian.PutUint32(msg[20:], uint32(1))           // streamID
-	binary.LittleEndian.PutUint32(msg[24:], uint32(5))           // posLimitCounterID
-	binary.LittleEndian.PutUint32(msg[28:], uint32(3))           // channelStatusID
-	binary.LittleEndian.PutUint32(msg[32:], uint32(0))           // logFileLength = 0 (no file)
+	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID)) // correlationID
+	binary.LittleEndian.PutUint64(msg[8:], uint64(100))    // registrationID
+	binary.LittleEndian.PutUint32(msg[16:], uint32(7))     // sessionID
+	binary.LittleEndian.PutUint32(msg[20:], uint32(1))     // streamID
+	binary.LittleEndian.PutUint32(msg[24:], uint32(5))     // posLimitCounterID
+	binary.LittleEndian.PutUint32(msg[28:], uint32(3))     // channelStatusID
+	binary.LittleEndian.PutUint32(msg[32:], uint32(0))     // logFileLength = 0 (no file)
 
 	c.onNewPublication(msg)
 
@@ -70,9 +70,9 @@ func TestOnError(t *testing.T) {
 
 	errMsg := "test error"
 	msg := make([]byte, 16+len(errMsg))
-	binary.LittleEndian.PutUint64(msg[0:], uint64(1))             // correlationID
-	binary.LittleEndian.PutUint32(msg[8:], uint32(42))            // errorCode
-	binary.LittleEndian.PutUint32(msg[12:], uint32(len(errMsg)))  // msgLength
+	binary.LittleEndian.PutUint64(msg[0:], uint64(1))            // correlationID
+	binary.LittleEndian.PutUint32(msg[8:], uint32(42))           // errorCode
+	binary.LittleEndian.PutUint32(msg[12:], uint32(len(errMsg))) // msgLength
 	copy(msg[16:], errMsg)
 
 	c.onError(msg)

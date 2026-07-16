@@ -1,18 +1,15 @@
 package cluster
 
-
-
-
 // Aeron cluster protocol message template IDs.
 const (
-	TemplateIdSessionMessageHeader = 1
-	TemplateIdSessionEvent         = 2
+	TemplateIdSessionMessageHeader  = 1
+	TemplateIdSessionEvent          = 2
 	TemplateIdSessionConnectRequest = 3
-	TemplateIdSessionCloseRequest  = 4
-	TemplateIdSessionKeepAlive     = 5
-	TemplateIdNewLeaderEvent       = 6
-	TemplateIdChallenge            = 7
-	TemplateIdChallengeResponse    = 8
+	TemplateIdSessionCloseRequest   = 4
+	TemplateIdSessionKeepAlive      = 5
+	TemplateIdNewLeaderEvent        = 6
+	TemplateIdChallenge             = 7
+	TemplateIdChallengeResponse     = 8
 )
 
 // Cluster protocol schema constants.

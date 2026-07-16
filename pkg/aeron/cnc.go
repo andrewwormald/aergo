@@ -11,18 +11,18 @@ import (
 
 // CnC (Command and Control) file layout.
 const (
-	CncVersion          = 26 // Aeron CnC version we support (1.46.x)
-	CncFilename         = "cnc.dat"
-	CncMetadataLength   = 2 * CacheLineLength // 128 bytes, padded to 2 cache lines
-	CncVersionOffset    = 0
-	CncToDriverLenOff   = 4
-	CncToClientsLenOff  = 8
-	CncCounterMetaOff   = 12
-	CncCounterValuesOff = 16
-	CncErrorLogLenOff   = 20
-	CncClientTimeoutOff = 24
+	CncVersion           = 26 // Aeron CnC version we support (1.46.x)
+	CncFilename          = "cnc.dat"
+	CncMetadataLength    = 2 * CacheLineLength // 128 bytes, padded to 2 cache lines
+	CncVersionOffset     = 0
+	CncToDriverLenOff    = 4
+	CncToClientsLenOff   = 8
+	CncCounterMetaOff    = 12
+	CncCounterValuesOff  = 16
+	CncErrorLogLenOff    = 20
+	CncClientTimeoutOff  = 24
 	CncStartTimestampOff = 32
-	CncPidOffset        = 40
+	CncPidOffset         = 40
 )
 
 // CncMetadata holds the parsed CnC file header.
@@ -43,11 +43,11 @@ type MappedCnc struct {
 	data     []byte
 	metadata CncMetadata
 
-	ToDriverBuffer   *AtomicBuffer
-	ToClientsBuffer  *AtomicBuffer
-	CounterMetadata  *AtomicBuffer
-	CounterValues    *AtomicBuffer
-	ErrorLogBuffer   *AtomicBuffer
+	ToDriverBuffer  *AtomicBuffer
+	ToClientsBuffer *AtomicBuffer
+	CounterMetadata *AtomicBuffer
+	CounterValues   *AtomicBuffer
+	ErrorLogBuffer  *AtomicBuffer
 }
 
 // MapCnc opens and memory-maps the CnC file from an Aeron media driver directory.
