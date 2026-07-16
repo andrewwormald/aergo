@@ -21,32 +21,32 @@ type Conductor struct {
 
 	heartbeatCounterId int32
 
-	mu           sync.Mutex
-	publications map[int64]*publicationState
+	mu            sync.Mutex
+	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
-	errors       []error
+	errors        []error
 }
 
 type publicationState struct {
-	correlationID    int64
-	registrationID   int64
-	channel          string
-	streamID         int32
-	logBuffersPath   string
-	sessionID        int32
+	correlationID     int64
+	registrationID    int64
+	channel           string
+	streamID          int32
+	logBuffersPath    string
+	sessionID         int32
 	posLimitCounterID int32
-	channelStatusID  int32
-	ready            bool
-	logBuffers       *LogBuffers
+	channelStatusID   int32
+	ready             bool
+	logBuffers        *LogBuffers
 }
 
 type subscriptionState struct {
-	correlationID int64
-	channel       string
-	streamID      int32
+	correlationID   int64
+	channel         string
+	streamID        int32
 	channelStatusID int32
-	ready         bool
-	images        []*Image
+	ready           bool
+	images          []*Image
 }
 
 // Image represents a subscription's connection to a publication.

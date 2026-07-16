@@ -1,6 +1,9 @@
 package aeron
 
-import "sync/atomic"
+import (
+	"math"
+	"sync/atomic"
+)
 
 // Publication wraps a log buffer for sending messages to a stream.
 type Publication struct {
@@ -11,26 +14,54 @@ type Publication struct {
 	registrationID int64
 	logBuffers     *LogBuffers
 	initialTermID  int32
-	posLimit       int32
 	closed         atomic.Bool
+
+	// posLimitCounterID identifies the publication-limit counter allocated
+	// by the driver (from RespOnPublication). Its volatile int64 value in
+	// counterValues is the max stream position we may claim up to.
+	posLimitCounterID int32
+	counterValues     *AtomicBuffer
 }
 
 func newPublication(conductor *Conductor, state *publicationState) *Publication {
 	p := &Publication{
-		conductor:      conductor,
-		channel:        state.channel,
-		streamID:       state.streamID,
-		sessionID:      state.sessionID,
-		registrationID: state.registrationID,
-		logBuffers:     state.logBuffers,
+		conductor:         conductor,
+		channel:           state.channel,
+		streamID:          state.streamID,
+		sessionID:         state.sessionID,
+		registrationID:    state.registrationID,
+		logBuffers:        state.logBuffers,
+		posLimitCounterID: state.posLimitCounterID,
 	}
 	if state.logBuffers != nil {
 		p.initialTermID = state.logBuffers.InitialTermID()
 	}
+	if conductor != nil && conductor.cnc != nil {
+		p.counterValues = conductor.cnc.CounterValues
+	}
 	return p
 }
 
+// positionLimit reads the publication-limit counter (flow control window).
+// If the counter is not available the limit is treated as unbounded.
+func (p *Publication) positionLimit() int64 {
+	if p.counterValues == nil || p.posLimitCounterID < 0 {
+		return math.MaxInt64
+	}
+	return p.counterValues.GetInt64Volatile(p.posLimitCounterID * CounterValueLength)
+}
+
 // Offer sends a message to the publication's stream.
+//
+// Returns the new stream position on success, otherwise a negative error
+// value:
+//
+//	-1 NOT_CONNECTED:  no active subscribers.
+//	-2 BACK_PRESSURED: the position limit (flow control window) is reached;
+//	   retry once subscribers have consumed.
+//	-3 ADMIN_ACTION:   the log rotated to the next term (or a rotation by
+//	   another publisher is in progress); retry the offer.
+//	-4 CLOSED:         the publication is closed.
 func (p *Publication) Offer(buf []byte) int64 {
 	if p.closed.Load() || p.logBuffers == nil {
 		return -4
@@ -39,21 +70,39 @@ func (p *Publication) Offer(buf []byte) int64 {
 		return -1
 	}
 
-	activeCount := p.logBuffers.ActiveTermCount()
-	partIndex := int(activeCount % PartitionCount)
-	term := p.logBuffers.Term(partIndex)
+	limit := p.positionLimit()
+	meta := p.logBuffers.Meta()
+	termCount := p.logBuffers.ActiveTermCount()
+	index := int(termCount % PartitionCount)
+	term := p.logBuffers.Term(index)
 	termLen := term.Capacity()
-	termID := p.initialTermID + activeCount
+	tailOff := int32(MetaTermTailCounterOff + index*8)
+
+	rawTail := meta.GetInt64Volatile(tailOff)
+	termID := rawTailTermID(rawTail)
+	termOffset := rawTailTermOffset(rawTail, termLen)
+
+	if termCount != termID-p.initialTermID {
+		return -3 // Rotation in progress by another thread; retry.
+	}
+
+	position := computePosition(termID, termOffset, termLen, p.initialTermID)
+	if position >= limit {
+		return -2
+	}
 
 	frameLen := int32(DataFrameHeaderLen + len(buf))
 	alignedLen := align(frameLen, DataFrameHeaderLen)
 
-	tailOff := int32(MetaTermTailCounterOff + partIndex*8)
-	rawTail := p.logBuffers.Meta().GetAndAddInt64(tailOff, int64(alignedLen))
-	termOffset := int32(rawTail)
+	// Claim space: atomically add to the tail, then work with the claimed
+	// termID/termOffset from the returned raw tail.
+	rawTail = meta.GetAndAddInt64(tailOff, int64(alignedLen))
+	termID = rawTailTermID(rawTail)
+	termOffset = rawTailTermOffset(rawTail, termLen)
 
-	if termOffset+alignedLen > termLen {
-		return -2
+	resultingOffset := termOffset + alignedLen
+	if resultingOffset > termLen {
+		return p.handleEndOfLog(term, termLen, termID, termOffset)
 	}
 
 	term.PutInt32(termOffset+FrameLengthOffset, 0)
@@ -67,10 +116,35 @@ func (p *Publication) Offer(buf []byte) int64 {
 	term.PutBytes(termOffset+DataFrameHeaderLen, buf)
 	term.PutInt32Ordered(termOffset+FrameLengthOffset, frameLen)
 
-	return computePosition(termID, termOffset+alignedLen, termLen, p.initialTermID)
+	return computePosition(termID, resultingOffset, termLen, p.initialTermID)
 }
 
-// OfferWithRetry retries Offer on back-pressure up to maxRetries times.
+// handleEndOfLog deals with a claim that tripped the end of the term: the
+// first thread to trip (termOffset still inside the term) writes a padding
+// frame over the remainder, then the log is rotated to the next term.
+// Always returns -3 (ADMIN_ACTION) so the caller retries the offer.
+func (p *Publication) handleEndOfLog(term *AtomicBuffer, termLen, termID, termOffset int32) int64 {
+	if termOffset < termLen {
+		paddingLen := termLen - termOffset
+		term.PutInt32(termOffset+FrameLengthOffset, 0)
+		term.PutUint8(termOffset+FrameVersionOffset, 0)
+		term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
+		term.PutInt32(termOffset+FrameTypeOffset, FrameTypePadding)
+		term.PutInt32(termOffset+FrameTermOffsetOff, termOffset)
+		term.PutInt32(termOffset+FrameSessionIDOff, p.sessionID)
+		term.PutInt32(termOffset+FrameStreamIDOff, p.streamID)
+		term.PutInt32(termOffset+FrameTermIDOff, termID)
+		term.PutInt32Ordered(termOffset+FrameLengthOffset, paddingLen)
+	}
+
+	rotateLog(p.logBuffers.Meta(), termID-p.initialTermID, termID)
+
+	return -3
+}
+
+// OfferWithRetry retries Offer up to maxRetries times while it returns a
+// retryable status: -2 (back-pressured) or -3 (log rotated / admin action).
+// Terminal statuses (success, -1 not connected, -4 closed) return immediately.
 func (p *Publication) OfferWithRetry(buf []byte, maxRetries int) int64 {
 	for i := 0; i <= maxRetries; i++ {
 		result := p.Offer(buf)

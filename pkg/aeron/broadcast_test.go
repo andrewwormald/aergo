@@ -73,10 +73,10 @@ func TestBroadcastReceiverSimulatedMessage(t *testing.T) {
 
 	// Create receiver starting at position 0
 	r := &BroadcastReceiver{
-		buffer:   buf,
-		capacity: capacity,
-		mask:     capacity - 1,
-		cursor:   0,
+		buffer:     buf,
+		capacity:   capacity,
+		mask:       capacity - 1,
+		cursor:     0,
 		nextRecord: 0,
 	}
 

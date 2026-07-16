@@ -96,14 +96,14 @@ type AeronCluster struct {
 	egressSub   *aeron.Subscription
 	ingressPubs []*aeron.Publication
 
-	leaderMemberId   int32
-	leadershipTermId int64
-	clusterSessionId int64
-	correlationId    int64
-	state            State
-	lastKeepAliveMs  int64
-	sendBuf          []byte
-	connectStartMs   int64
+	leaderMemberId    int32
+	leadershipTermId  int64
+	clusterSessionId  int64
+	correlationId     int64
+	state             State
+	lastKeepAliveMs   int64
+	sendBuf           []byte
+	connectStartMs    int64
 	reconnectAttempts int
 	reconnectBackoff  int64
 	lastReconnectMs   int64
@@ -195,10 +195,10 @@ func (c *AeronCluster) GracefulClose() {
 	}
 }
 
-func (c *AeronCluster) State() State              { return c.state }
-func (c *AeronCluster) LeaderMemberId() int32     { return c.leaderMemberId }
-func (c *AeronCluster) ClusterSessionId() int64   { return c.clusterSessionId }
-func (c *AeronCluster) LeadershipTermId() int64   { return c.leadershipTermId }
+func (c *AeronCluster) State() State            { return c.state }
+func (c *AeronCluster) LeaderMemberId() int32   { return c.leaderMemberId }
+func (c *AeronCluster) ClusterSessionId() int64 { return c.clusterSessionId }
+func (c *AeronCluster) LeadershipTermId() int64 { return c.leadershipTermId }
 
 func (c *AeronCluster) Close() error {
 	c.state = StateClosed
