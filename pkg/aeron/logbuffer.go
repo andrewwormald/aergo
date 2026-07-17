@@ -212,7 +212,7 @@ func (a *TermAppender) Append(
 	termLen := a.term.Capacity()
 
 	if termOffset+alignedLen > termLen {
-		return -2 // BACK_PRESSURED - term full
+		return BackPressured // term full
 	}
 
 	// Write frame header

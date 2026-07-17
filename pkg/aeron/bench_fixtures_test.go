@@ -2,6 +2,7 @@ package aeron
 
 import (
 	"math"
+	"time"
 	"unsafe"
 )
 
@@ -92,6 +93,79 @@ func setInMemSubscriberPosCounter(sub *Subscription, counterID int32) *AtomicBuf
 	img.SubscriberPos = counterID
 	img.counterValues = counterValues
 	return counterValues
+}
+
+// newInMemCnc builds a MappedCnc backed by heap buffers (no mmap, no
+// aeronmd) with room for numCounters counters. The driver heartbeat counter
+// (counter 0) starts at zero; doctor it with setInMemDriverHeartbeat.
+func newInMemCnc(numCounters int32) *MappedCnc {
+	return &MappedCnc{
+		CounterMetadata: NewAtomicBuffer(make([]byte, numCounters*CounterMetadataLength)),
+		CounterValues:   NewAtomicBuffer(make([]byte, numCounters*CounterValueLength)),
+	}
+}
+
+// setInMemDriverHeartbeat doctors the driver heartbeat timestamp (counter 0)
+// read by MappedCnc.DriverHeartbeat.
+func setInMemDriverHeartbeat(cnc *MappedCnc, timestampMs int64) {
+	cnc.CounterValues.PutInt64Ordered(0, timestampMs)
+}
+
+// inMemBroadcast is a heap-backed to-clients broadcast buffer plus a
+// single-threaded transmitter, standing in for the media driver's side of
+// the broadcast protocol so tests can inject driver responses.
+type inMemBroadcast struct {
+	buf      *AtomicBuffer
+	capacity int32
+	tail     int64
+}
+
+func newInMemBroadcast(capacity int32) *inMemBroadcast {
+	return &inMemBroadcast{
+		buf:      NewAtomicBuffer(make([]byte, capacity+bcTrailerLength)),
+		capacity: capacity,
+	}
+}
+
+// transmit appends one record the way the driver's broadcast transmitter
+// does: claim via the tail-intent counter, write the record, then publish
+// the latest and tail counters.
+func (b *inMemBroadcast) transmit(msgTypeID int32, payload []byte) {
+	recordLen := int32(RecordHeaderLength + len(payload))
+	alignedLen := align(recordLen, RecordAlignment)
+	recordOffset := int32(b.tail) & (b.capacity - 1)
+
+	b.buf.PutInt64Ordered(b.capacity+bcTailIntentCounterOff, b.tail+int64(alignedLen))
+	b.buf.PutInt32(recordOffset, recordLen)
+	b.buf.PutInt32(recordOffset+4, msgTypeID)
+	b.buf.PutBytes(recordOffset+RecordHeaderLength, payload)
+	b.buf.PutInt64Ordered(b.capacity+bcLatestCounterOff, b.tail)
+	b.buf.PutInt64Ordered(b.capacity+bcTailCounterOff, b.tail+int64(alignedLen))
+
+	b.tail += int64(alignedLen)
+}
+
+// newInMemConductor builds a Conductor wired to in-memory stand-ins for the
+// driver interfaces: a cnc fixture (with a fresh heartbeat), a to-driver ring
+// buffer, and a to-clients broadcast buffer whose transmitter is returned so
+// tests can inject driver responses.
+func newInMemConductor(clientID int64) (*Conductor, *inMemBroadcast) {
+	bcast := newInMemBroadcast(1024)
+	cnc := newInMemCnc(4)
+	setInMemDriverHeartbeat(cnc, time.Now().UnixMilli())
+
+	cfg := DefaultContext()
+	return &Conductor{
+		cnc:                cnc,
+		proxy:              NewDriverProxy(newTestRingBuffer(4096), clientID),
+		broadcastRecv:      NewCopyBroadcastReceiver(NewBroadcastReceiver(bcast.buf)),
+		clientID:           clientID,
+		driverTimeoutNs:    cfg.DriverTimeoutMs * 1_000_000,
+		keepaliveInterNs:   cfg.KeepaliveInterMs * 1_000_000,
+		heartbeatCounterId: -1,
+		publications:       make(map[int64]*publicationState),
+		subscriptions:      make(map[int64]*subscriptionState),
+	}, bcast
 }
 
 // newInMemSubscription builds a Subscription with a single ready Image

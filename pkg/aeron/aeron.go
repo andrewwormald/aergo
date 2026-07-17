@@ -53,11 +53,44 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 		return nil, err
 	}
 
+	// Fail fast when the media driver is dead: a stale heartbeat means every
+	// subsequent Add* would hang until its wait timeout.
+	if err := conductor.checkDriverLiveness(time.Now().UnixMilli()); err != nil {
+		if closeErr := conductor.Close(); closeErr != nil {
+			log.Printf("aeron: close after failed liveness check: %v", closeErr)
+		}
+		return nil, err
+	}
+
 	return &Aeron{conductor: conductor}, nil
+}
+
+// preAddCheck fails fast before waiting on a driver response: a terminated
+// conductor (the driver timed out this client) or a stale driver heartbeat
+// means the wait could never succeed.
+func (c *Aeron) preAddCheck() error {
+	if err := c.conductor.FatalError(); err != nil {
+		return err
+	}
+	return c.conductor.checkDriverLiveness(time.Now().UnixMilli())
+}
+
+// awaitError reports the first error that should abort a pending Add* wait:
+// a driver rejection of the command (RespOnError) or a terminal client
+// error (driver/client timeout).
+func (c *Aeron) awaitError(corrID int64) error {
+	if err := c.conductor.pendingError(corrID); err != nil {
+		return err
+	}
+	return c.conductor.FatalError()
 }
 
 // AddPublication creates a publication for the given channel and stream.
 func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, error) {
+	if err := c.preAddCheck(); err != nil {
+		return nil, err
+	}
+
 	corrID := c.conductor.AddPublication(channel, streamID)
 	if corrID < 0 {
 		return nil, fmt.Errorf("add publication failed")
@@ -66,6 +99,9 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 	deadline := time.Now().Add(publicationWaitTimeout)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
+		if err := c.awaitError(corrID); err != nil {
+			return nil, err
+		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
 			c.tryFindHeartbeatCounter()
 			return newPublication(c.conductor, state), nil
@@ -84,6 +120,10 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 // On the driver side this is a different command (CmdAddExclusivePublication)
 // but the response and Publication type are identical to AddPublication.
 func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
+	if err := c.preAddCheck(); err != nil {
+		return nil, err
+	}
+
 	corrID := c.conductor.AddExclusivePublication(channel, streamID)
 	if corrID < 0 {
 		return nil, fmt.Errorf("add exclusive publication failed")
@@ -92,6 +132,9 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 	deadline := time.Now().Add(publicationWaitTimeout)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
+		if err := c.awaitError(corrID); err != nil {
+			return nil, err
+		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
 			c.tryFindHeartbeatCounter()
 			return newPublication(c.conductor, state), nil
@@ -103,6 +146,10 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 
 // AddSubscription creates a subscription for the given channel and stream.
 func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, error) {
+	if err := c.preAddCheck(); err != nil {
+		return nil, err
+	}
+
 	corrID := c.conductor.AddSubscription(channel, streamID)
 	if corrID < 0 {
 		return nil, fmt.Errorf("add subscription failed")
@@ -111,6 +158,9 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
+		if err := c.awaitError(corrID); err != nil {
+			return nil, err
+		}
 		if state := c.conductor.FindSubscription(corrID); state != nil {
 			c.tryFindHeartbeatCounter()
 			return newSubscription(c.conductor, corrID, state), nil

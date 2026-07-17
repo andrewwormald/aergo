@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,10 +22,17 @@ type Conductor struct {
 
 	heartbeatCounterId int32
 
+	// terminated flips once when the client becomes closed-equivalent (the
+	// driver timed out this client, or the driver itself went unresponsive).
+	// Offers on this conductor's publications then return Closed and Add*
+	// calls fail fast with fatalErr.
+	terminated atomic.Bool
+
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
 	errors        []error
+	fatalErr      error
 }
 
 type publicationState struct {
@@ -38,6 +46,9 @@ type publicationState struct {
 	channelStatusID   int32
 	ready             bool
 	logBuffers        *LogBuffers
+	// err records the driver's rejection (RespOnError) of the add command so
+	// the pending AddPublication/AddExclusivePublication call fails with it.
+	err error
 }
 
 type subscriptionState struct {
@@ -47,6 +58,9 @@ type subscriptionState struct {
 	channelStatusID int32
 	ready           bool
 	images          []*Image
+	// err records the driver's rejection (RespOnError) of the add command so
+	// the pending AddSubscription call fails with it.
+	err error
 }
 
 // Image represents a subscription's connection to a publication.
@@ -243,6 +257,16 @@ func (c *Conductor) DoWork() int {
 
 	now := time.Now().UnixNano()
 	if now-c.lastKeepaliveNs > c.keepaliveInterNs {
+		// Piggyback the driver-liveness check on the keepalive interval
+		// (mirrors Java ClientConductor.checkLiveness): a stale driver
+		// heartbeat terminates the conductor so Offers return Closed and
+		// Add* calls fail fast instead of hanging.
+		if !c.terminated.Load() {
+			if err := c.checkDriverLiveness(time.Now().UnixMilli()); err != nil {
+				c.terminate(err)
+			}
+		}
+
 		c.proxy.SendClientKeepalive()
 
 		if c.heartbeatCounterId < 0 {
@@ -275,8 +299,85 @@ func (c *Conductor) onDriverMessage(msgTypeID int32, buffer []byte, offset, leng
 	case RespOnUnavailableCounter:
 	case RespOnOperationSuccess:
 	case RespOnClientTimeout:
+		c.onClientTimeout(buffer[offset : offset+length])
 	default:
 	}
+}
+
+// onClientTimeout handles RespOnClientTimeout: the driver stopped receiving
+// this client's keepalives and released its resources. The conductor becomes
+// closed-equivalent (mirrors Java ClientConductor.onClientTimeout).
+//
+// Message layout (io.aeron.command.ClientTimeoutFlyweight):
+//
+//	offset 0: clientID int64
+func (c *Conductor) onClientTimeout(msg []byte) {
+	if len(msg) < 8 {
+		return
+	}
+	clientID := int64(binary.LittleEndian.Uint64(msg[0:]))
+	// The event is broadcast to all clients; only act on our own timeout
+	// (mirrors Java DriverEventsAdapter's clientId filter).
+	if clientID != c.clientID {
+		return
+	}
+	c.terminate(&ClientTimeoutError{})
+}
+
+// terminate marks the conductor closed-equivalent with the fatal error that
+// caused it. The first terminal error wins; later calls are no-ops.
+func (c *Conductor) terminate(err error) {
+	if !c.terminated.CompareAndSwap(false, true) {
+		return
+	}
+	c.mu.Lock()
+	c.fatalErr = err
+	c.errors = append(c.errors, err)
+	c.mu.Unlock()
+	log.Printf("native: %v", err)
+}
+
+// isTerminated reports whether the conductor is closed-equivalent.
+func (c *Conductor) isTerminated() bool {
+	return c.terminated.Load()
+}
+
+// FatalError returns the terminal error that closed this conductor (driver
+// timeout or client timeout), or nil while the conductor is healthy.
+func (c *Conductor) FatalError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fatalErr
+}
+
+// pendingError returns the driver rejection recorded against a pending
+// AddPublication/AddExclusivePublication/AddSubscription correlation ID,
+// or nil when the command has not been rejected.
+func (c *Conductor) pendingError(corrID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if pub := c.publications[corrID]; pub != nil && pub.err != nil {
+		return pub.err
+	}
+	if sub := c.subscriptions[corrID]; sub != nil && sub.err != nil {
+		return sub.err
+	}
+	return nil
+}
+
+// checkDriverLiveness returns a DriverTimeoutError when the media driver's
+// heartbeat timestamp is older than the driver timeout (mirrors Java
+// ClientConductor.checkLiveness). A nil cnc (in-memory tests) always passes.
+func (c *Conductor) checkDriverLiveness(nowMs int64) error {
+	if c.cnc == nil {
+		return nil
+	}
+	timeoutMs := c.driverTimeoutNs / 1_000_000
+	heartbeatMs := c.cnc.DriverHeartbeat()
+	if nowMs > heartbeatMs+timeoutMs {
+		return &DriverTimeoutError{HeartbeatAgeMs: nowMs - heartbeatMs, TimeoutMs: timeoutMs}
+	}
+	return nil
 }
 
 func (c *Conductor) onNewPublication(msg []byte) {
@@ -356,7 +457,9 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	//   offset 24: subscriberPositionID         int32
 	//   offset 28: logFileName length           int32
 	//   offset 32: logFileName bytes            ASCII
-	//   after logFile (aligned to int): sourceIdentity length int32 + bytes
+	//   offset 32 + align(logFileNameLength, 4):
+	//              sourceIdentity length        int32
+	//              sourceIdentity bytes         ASCII
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
 	sessionID := int32(binary.LittleEndian.Uint32(msg[8:]))
 	// streamID at offset 12 — not currently needed
@@ -364,8 +467,20 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	subPosID := int32(binary.LittleEndian.Uint32(msg[24:]))
 	logFileLen := int32(binary.LittleEndian.Uint32(msg[28:]))
 	logFile := ""
-	if len(msg) >= 32+int(logFileLen) {
+	if logFileLen > 0 && len(msg) >= 32+int(logFileLen) {
 		logFile = string(msg[32 : 32+logFileLen])
+	}
+
+	// The source identity is a second length-prefixed ASCII string after the
+	// log file name; its length prefix is int-aligned (mirrors Java
+	// ImageBuffersReadyFlyweight.sourceIdentityOffset).
+	sourceIdentity := ""
+	srcOff := 32 + int(align(logFileLen, 4))
+	if len(msg) >= srcOff+4 {
+		srcLen := int32(binary.LittleEndian.Uint32(msg[srcOff:]))
+		if srcLen > 0 && len(msg) >= srcOff+4+int(srcLen) {
+			sourceIdentity = string(msg[srcOff+4 : srcOff+4+int(srcLen)])
+		}
 	}
 	// The driver allocates a subscriber position counter per image and
 	// initialises it to the stream join position. Adopt that as the initial
@@ -392,6 +507,7 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 		LogBuffers:         lb,
 		SubscriberPos:      subPosID,
 		JoinPosition:       joinPos,
+		SourceIdentity:     sourceIdentity,
 		subscriberPosition: joinPos,
 		counterValues:      counterValues,
 	}
@@ -427,6 +543,16 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 	c.mu.Unlock()
 }
 
+// onError handles RespOnError: the driver rejected a command. The error is
+// recorded against the offending correlation ID so a pending Add* call fails
+// with it, and accumulated in the conductor's error list.
+//
+// Message layout (io.aeron.command.ErrorResponseFlyweight):
+//
+//	offset 0:  offendingCommandCorrelationID int64
+//	offset 8:  errorCode                     int32
+//	offset 12: errorMessageLength            int32
+//	offset 16: errorMessage                  ASCII bytes
 func (c *Conductor) onError(msg []byte) {
 	if len(msg) < 12 {
 		return
@@ -436,13 +562,19 @@ func (c *Conductor) onError(msg []byte) {
 	errMsg := ""
 	if len(msg) >= 16 {
 		errMsgLen := int32(binary.LittleEndian.Uint32(msg[12:]))
-		if len(msg) >= 16+int(errMsgLen) {
+		if errMsgLen > 0 && len(msg) >= 16+int(errMsgLen) {
 			errMsg = string(msg[16 : 16+errMsgLen])
 		}
 	}
 
-	err := fmt.Errorf("driver error (corrID=%d, code=%d): %s", corrID, errCode, errMsg)
+	err := &RegistrationError{CorrelationID: corrID, Code: errCode, Message: errMsg}
 	c.mu.Lock()
+	if pub := c.publications[corrID]; pub != nil {
+		pub.err = err
+	}
+	if sub := c.subscriptions[corrID]; sub != nil {
+		sub.err = err
+	}
 	c.errors = append(c.errors, err)
 	c.mu.Unlock()
 
