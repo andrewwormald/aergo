@@ -46,8 +46,8 @@ func TestOffer_RotatesAtEndOfTerm(t *testing.T) {
 
 	// The next offer trips the end of the term: it must rotate and ask the
 	// caller to retry.
-	if got := pub.Offer(payload); got != -3 {
-		t.Fatalf("offer at end of term: got %d, want -3 (ADMIN_ACTION)", got)
+	if got := pub.Offer(payload); got != AdminAction {
+		t.Fatalf("offer at end of term: got %d, want AdminAction", got)
 	}
 
 	// A padding frame must fill the remainder of term 0.
@@ -109,7 +109,7 @@ func TestOffer_FullCycleThroughAllPartitions(t *testing.T) {
 			t.Fatal("no progress after 10000 offers")
 		}
 		pos := pub.Offer(payload)
-		if pos == -3 {
+		if pos == AdminAction {
 			rotations++
 			continue
 		}
@@ -171,7 +171,7 @@ func TestOffer_ConcurrentOffersAcrossRotation(t *testing.T) {
 				ok := false
 				for attempt := 0; attempt < 1000; attempt++ {
 					pos := pub.Offer(payload)
-					if pos == -3 {
+					if pos == AdminAction {
 						continue // rotation: retry
 					}
 					if pos <= 0 {
@@ -183,7 +183,7 @@ func TestOffer_ConcurrentOffersAcrossRotation(t *testing.T) {
 					break
 				}
 				if !ok {
-					errs <- errOffer(-3)
+					errs <- errOffer(AdminAction)
 					return
 				}
 			}
@@ -249,8 +249,8 @@ func TestOffer_BackPressuredAtPositionLimit(t *testing.T) {
 
 	// position (0) >= limit (0): back-pressured.
 	setInMemPosLimit(pub, 0)
-	if got := pub.Offer(payload); got != -2 {
-		t.Fatalf("offer with limit 0: got %d, want -2", got)
+	if got := pub.Offer(payload); got != BackPressured {
+		t.Fatalf("offer with limit 0: got %d, want BackPressured", got)
 	}
 
 	// position (0) < limit (1): the offer proceeds.
@@ -261,14 +261,78 @@ func TestOffer_BackPressuredAtPositionLimit(t *testing.T) {
 	}
 
 	// position (160) >= limit (1): back-pressured again.
-	if got := pub.Offer(payload); got != -2 {
-		t.Fatalf("offer past limit: got %d, want -2", got)
+	if got := pub.Offer(payload); got != BackPressured {
+		t.Fatalf("offer past limit: got %d, want BackPressured", got)
 	}
 
 	// Raising the limit unblocks the publication.
 	setInMemPosLimit(pub, math.MaxInt64)
 	if got := pub.Offer(payload); got != pos+int64(offerTestAlignedLen) {
 		t.Fatalf("offer after raising limit: got %d, want %d", got, pos+int64(offerTestAlignedLen))
+	}
+}
+
+func TestOffer_MaxPositionExceeded(t *testing.T) {
+	// maxPossiblePosition = termLen << 31. Doctor the log so the stream sits
+	// on the final possible term: termCount = termID - initialTermID =
+	// math.MaxInt32, which puts positions at (2^31 - 1) * termLen + tail.
+	const maxTermCount = int32(math.MaxInt32)
+	maxPos := maxPossiblePosition(offerTestTermLen)
+
+	tests := []struct {
+		name       string
+		tailOffset int32
+		limit      int64
+		want       int64
+	}{
+		{
+			// position + alignedFrameLen == maxPossiblePosition: the
+			// back-pressure branch must report the terminal condition.
+			name:       "back pressured claim reaching max position",
+			tailOffset: offerTestTermLen - offerTestAlignedLen,
+			limit:      0,
+			want:       MaxPositionExceeded,
+		},
+		{
+			// Same term but with room below maxPossiblePosition: plain
+			// back pressure.
+			name:       "back pressured claim below max position",
+			tailOffset: 0,
+			limit:      0,
+			want:       BackPressured,
+		},
+		{
+			// The claim trips the end of the final term: handleEndOfLog must
+			// return MaxPositionExceeded instead of rotating.
+			name:       "end of log on final term",
+			tailOffset: offerTestTermLen - offerTestAlignedLen + 32,
+			limit:      math.MaxInt64,
+			want:       MaxPositionExceeded,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lb := newInMemLogBuffers(offerTestTermLen)
+			pub := newInMemPublication(lb, 7, 1001)
+			setInMemPosLimit(pub, tc.limit)
+
+			index := int32(maxTermCount % PartitionCount)
+			lb.meta.PutInt32Ordered(MetaActiveTermCountOff, maxTermCount)
+			lb.meta.PutInt64Ordered(int32(MetaTermTailCounterOff)+index*8,
+				packTail(maxTermCount, tc.tailOffset))
+
+			payload := make([]byte, offerTestPayloadLen)
+			if got := pub.Offer(payload); got != tc.want {
+				t.Fatalf("offer near max position %d: got %d, want %d", maxPos, got, tc.want)
+			}
+
+			// A publication at max position is unrecoverable: the log must
+			// never rotate past the final term.
+			if got := lb.ActiveTermCount(); got != maxTermCount {
+				t.Errorf("activeTermCount: got %d, want %d (no rotation)", got, maxTermCount)
+			}
+		})
 	}
 }
 

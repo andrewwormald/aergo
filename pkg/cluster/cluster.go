@@ -169,7 +169,7 @@ func (c *AeronCluster) Poll() int {
 
 func (c *AeronCluster) Offer(buf []byte) int64 {
 	if c.state != StateConnected {
-		return -1
+		return aeron.NotConnected
 	}
 
 	smh := SessionMessageHeader{
@@ -181,7 +181,7 @@ func (c *AeronCluster) Offer(buf []byte) int64 {
 
 	pub := c.leaderPublication()
 	if pub == nil {
-		return -1
+		return aeron.NotConnected
 	}
 	return pub.Offer(c.sendBuf[:n+len(buf)])
 }

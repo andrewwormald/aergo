@@ -54,20 +54,17 @@ func (p *Publication) positionLimit() int64 {
 // Offer sends a message to the publication's stream.
 //
 // Returns the new stream position on success, otherwise a negative error
-// value:
-//
-//	-1 NOT_CONNECTED:  no active subscribers.
-//	-2 BACK_PRESSURED: the position limit (flow control window) is reached;
-//	   retry once subscribers have consumed.
-//	-3 ADMIN_ACTION:   the log rotated to the next term (or a rotation by
-//	   another publisher is in progress); retry the offer.
-//	-4 CLOSED:         the publication is closed.
+// value of NotConnected, BackPressured, AdminAction, Closed, or
+// MaxPositionExceeded.
 func (p *Publication) Offer(buf []byte) int64 {
 	if p.closed.Load() || p.logBuffers == nil {
-		return -4
+		return Closed
+	}
+	if p.conductor != nil && p.conductor.isTerminated() {
+		return Closed
 	}
 	if !p.logBuffers.IsConnected() {
-		return -1
+		return NotConnected
 	}
 
 	limit := p.positionLimit()
@@ -83,16 +80,16 @@ func (p *Publication) Offer(buf []byte) int64 {
 	termOffset := rawTailTermOffset(rawTail, termLen)
 
 	if termCount != termID-p.initialTermID {
-		return -3 // Rotation in progress by another thread; retry.
-	}
-
-	position := computePosition(termID, termOffset, termLen, p.initialTermID)
-	if position >= limit {
-		return -2
+		return AdminAction // Rotation in progress by another thread; retry.
 	}
 
 	frameLen := int32(DataFrameHeaderLen + len(buf))
 	alignedLen := align(frameLen, DataFrameHeaderLen)
+
+	position := computePosition(termID, termOffset, termLen, p.initialTermID)
+	if position >= limit {
+		return p.backPressureStatus(position, alignedLen, termLen)
+	}
 
 	// Claim space: atomically add to the tail, then work with the claimed
 	// termID/termOffset from the returned raw tail.
@@ -101,8 +98,9 @@ func (p *Publication) Offer(buf []byte) int64 {
 	termOffset = rawTailTermOffset(rawTail, termLen)
 
 	resultingOffset := termOffset + alignedLen
+	resultingPosition := computePosition(termID, resultingOffset, termLen, p.initialTermID)
 	if resultingOffset > termLen {
-		return p.handleEndOfLog(term, termLen, termID, termOffset)
+		return p.handleEndOfLog(term, termLen, termID, termOffset, resultingPosition)
 	}
 
 	term.PutInt32(termOffset+FrameLengthOffset, 0)
@@ -116,14 +114,43 @@ func (p *Publication) Offer(buf []byte) int64 {
 	term.PutBytes(termOffset+DataFrameHeaderLen, buf)
 	term.PutInt32Ordered(termOffset+FrameLengthOffset, frameLen)
 
-	return computePosition(termID, resultingOffset, termLen, p.initialTermID)
+	return resultingPosition
+}
+
+// maxPossiblePosition is the maximum position a stream can reach given its
+// term length: termLen << 31 (Java Publication: termBufferLength * (1L << 31),
+// the term length times the total possible number of terms).
+func maxPossiblePosition(termLen int32) int64 {
+	return int64(termLen) << 31
+}
+
+// backPressureStatus resolves the status of an offer that reached the
+// flow-control position limit, mirroring Java Publication.backPressureStatus:
+// if appending the aligned frame would meet or exceed the stream's maximum
+// possible position the publication can make no further progress
+// (MaxPositionExceeded); otherwise it is BackPressured while subscribers are
+// connected and NotConnected when they are not.
+//
+// alignedFrameLen is align(messageLength+DataFrameHeaderLen, FrameAlignment),
+// which the caller has already computed.
+func (p *Publication) backPressureStatus(currentPosition int64, alignedFrameLen, termLen int32) int64 {
+	if currentPosition+int64(alignedFrameLen) >= maxPossiblePosition(termLen) {
+		return MaxPositionExceeded
+	}
+	if p.logBuffers.IsConnected() {
+		return BackPressured
+	}
+	return NotConnected
 }
 
 // handleEndOfLog deals with a claim that tripped the end of the term: the
 // first thread to trip (termOffset still inside the term) writes a padding
-// frame over the remainder, then the log is rotated to the next term.
-// Always returns -3 (ADMIN_ACTION) so the caller retries the offer.
-func (p *Publication) handleEndOfLog(term *AtomicBuffer, termLen, termID, termOffset int32) int64 {
+// frame over the remainder. If the claimed position reached the stream's
+// maximum possible position the publication is unrecoverable and
+// MaxPositionExceeded is returned without rotating (mirrors Java
+// ConcurrentPublication.handleEndOfLog); otherwise the log is rotated to the
+// next term and AdminAction is returned so the caller retries the offer.
+func (p *Publication) handleEndOfLog(term *AtomicBuffer, termLen, termID, termOffset int32, position int64) int64 {
 	if termOffset < termLen {
 		paddingLen := termLen - termOffset
 		term.PutInt32(termOffset+FrameLengthOffset, 0)
@@ -137,22 +164,27 @@ func (p *Publication) handleEndOfLog(term *AtomicBuffer, termLen, termID, termOf
 		term.PutInt32Ordered(termOffset+FrameLengthOffset, paddingLen)
 	}
 
+	if position >= maxPossiblePosition(termLen) {
+		return MaxPositionExceeded
+	}
+
 	rotateLog(p.logBuffers.Meta(), termID-p.initialTermID, termID)
 
-	return -3
+	return AdminAction
 }
 
 // OfferWithRetry retries Offer up to maxRetries times while it returns a
-// retryable status: -2 (back-pressured) or -3 (log rotated / admin action).
-// Terminal statuses (success, -1 not connected, -4 closed) return immediately.
+// retryable status: BackPressured or AdminAction (log rotated). Terminal
+// statuses (success, NotConnected, Closed, MaxPositionExceeded) return
+// immediately.
 func (p *Publication) OfferWithRetry(buf []byte, maxRetries int) int64 {
 	for i := 0; i <= maxRetries; i++ {
 		result := p.Offer(buf)
-		if result > 0 || result == -1 || result == -4 {
+		if result > 0 || result == NotConnected || result == Closed || result == MaxPositionExceeded {
 			return result
 		}
 	}
-	return -2
+	return BackPressured
 }
 
 // IsConnected returns whether the publication has active subscribers.

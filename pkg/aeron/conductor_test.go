@@ -2,7 +2,12 @@ package aeron
 
 import (
 	"encoding/binary"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestOnNewPublication(t *testing.T) {
@@ -268,6 +273,238 @@ func peekFirstCommandType(t *testing.T, rb *ManyToOneRingBuffer) int32 {
 		t.Fatal("ring buffer was empty — no command written")
 	}
 	return rb.buffer.GetInt32(4)
+}
+
+// encodeErrorResponse builds a RespOnError message per
+// io.aeron.command.ErrorResponseFlyweight.
+func encodeErrorResponse(corrID int64, errCode int32, errMsg string) []byte {
+	msg := make([]byte, 16+len(errMsg))
+	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))
+	binary.LittleEndian.PutUint32(msg[8:], uint32(errCode))
+	binary.LittleEndian.PutUint32(msg[12:], uint32(len(errMsg)))
+	copy(msg[16:], errMsg)
+	return msg
+}
+
+func TestOnErrorFailsPendingAdd(t *testing.T) {
+	tests := []struct {
+		name string
+		add  func(c *Conductor) int64
+	}{
+		{"publication", func(c *Conductor) int64 { return c.AddPublication("aeron:ipc", 101) }},
+		{"exclusive publication", func(c *Conductor) int64 { return c.AddExclusivePublication("aeron:ipc", 101) }},
+		{"subscription", func(c *Conductor) int64 { return c.AddSubscription("aeron:ipc", 101) }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Conductor{
+				proxy:         NewDriverProxy(newTestRingBuffer(4096), 42),
+				publications:  make(map[int64]*publicationState),
+				subscriptions: make(map[int64]*subscriptionState),
+			}
+
+			corrID := tc.add(c)
+			if corrID < 0 {
+				t.Fatalf("add returned %d", corrID)
+			}
+			if err := c.pendingError(corrID); err != nil {
+				t.Fatalf("pendingError before rejection: got %v, want nil", err)
+			}
+
+			driverMsg := "invalid channel: no such network interface"
+			msg := encodeErrorResponse(corrID, 1 /* INVALID_CHANNEL */, driverMsg)
+			c.onDriverMessage(RespOnError, msg, 0, int32(len(msg)))
+
+			err := c.pendingError(corrID)
+			if err == nil {
+				t.Fatal("pendingError after rejection: got nil, want error")
+			}
+			var regErr *RegistrationError
+			if !errors.As(err, &regErr) {
+				t.Fatalf("error type: got %T, want *RegistrationError", err)
+			}
+			if regErr.CorrelationID != corrID || regErr.Code != 1 || regErr.Message != driverMsg {
+				t.Errorf("RegistrationError fields: got %+v", regErr)
+			}
+			if !strings.Contains(err.Error(), "INVALID_CHANNEL") || !strings.Contains(err.Error(), driverMsg) {
+				t.Errorf("error text missing code name or driver message: %q", err.Error())
+			}
+
+			// An unrelated correlation ID must be unaffected.
+			if err := c.pendingError(corrID + 1000); err != nil {
+				t.Errorf("pendingError for unrelated corrID: got %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestOnClientTimeout(t *testing.T) {
+	newConductor := func() *Conductor {
+		return &Conductor{
+			clientID:      42,
+			publications:  make(map[int64]*publicationState),
+			subscriptions: make(map[int64]*subscriptionState),
+		}
+	}
+	encodeClientTimeout := func(clientID int64) []byte {
+		msg := make([]byte, 8)
+		binary.LittleEndian.PutUint64(msg[0:], uint64(clientID))
+		return msg
+	}
+
+	t.Run("other client's timeout is ignored", func(t *testing.T) {
+		c := newConductor()
+		msg := encodeClientTimeout(7)
+		c.onDriverMessage(RespOnClientTimeout, msg, 0, int32(len(msg)))
+
+		if c.isTerminated() {
+			t.Error("conductor terminated by another client's timeout")
+		}
+		if err := c.FatalError(); err != nil {
+			t.Errorf("FatalError: got %v, want nil", err)
+		}
+	})
+
+	t.Run("own timeout terminates the client", func(t *testing.T) {
+		c := newConductor()
+		msg := encodeClientTimeout(42)
+		c.onDriverMessage(RespOnClientTimeout, msg, 0, int32(len(msg)))
+
+		if !c.isTerminated() {
+			t.Fatal("conductor not terminated by own client timeout")
+		}
+		var timeoutErr *ClientTimeoutError
+		if err := c.FatalError(); !errors.As(err, &timeoutErr) {
+			t.Fatalf("FatalError: got %v, want *ClientTimeoutError", err)
+		}
+
+		// Offers on the terminated client's publications must return Closed.
+		lb := newInMemLogBuffers(offerTestTermLen)
+		pub := newInMemPublication(lb, 7, 1001)
+		pub.conductor = c
+		if got := pub.Offer(make([]byte, 8)); got != Closed {
+			t.Errorf("Offer after client timeout: got %d, want Closed", got)
+		}
+	})
+}
+
+func TestCheckDriverLiveness(t *testing.T) {
+	const timeoutMs = int64(10_000)
+	nowMs := int64(1_000_000)
+
+	tests := []struct {
+		name        string
+		cnc         *MappedCnc
+		heartbeatMs int64
+		wantErr     bool
+	}{
+		{name: "nil cnc passes", cnc: nil},
+		{name: "fresh heartbeat passes", cnc: newInMemCnc(1), heartbeatMs: nowMs - 500},
+		{name: "heartbeat at timeout boundary passes", cnc: newInMemCnc(1), heartbeatMs: nowMs - timeoutMs},
+		{name: "stale heartbeat fails", cnc: newInMemCnc(1), heartbeatMs: nowMs - timeoutMs - 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Conductor{cnc: tc.cnc, driverTimeoutNs: timeoutMs * 1_000_000}
+			if tc.cnc != nil {
+				setInMemDriverHeartbeat(tc.cnc, tc.heartbeatMs)
+			}
+
+			err := c.checkDriverLiveness(nowMs)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("checkDriverLiveness: got %v, want nil", err)
+				}
+				return
+			}
+			var timeoutErr *DriverTimeoutError
+			if !errors.As(err, &timeoutErr) {
+				t.Fatalf("error type: got %T (%v), want *DriverTimeoutError", err, err)
+			}
+			if timeoutErr.HeartbeatAgeMs != nowMs-tc.heartbeatMs || timeoutErr.TimeoutMs != timeoutMs {
+				t.Errorf("DriverTimeoutError fields: got %+v", timeoutErr)
+			}
+		})
+	}
+}
+
+func TestDoWorkTerminatesOnStaleDriverHeartbeat(t *testing.T) {
+	c, _ := newInMemConductor(42)
+	setInMemDriverHeartbeat(c.cnc, time.Now().UnixMilli()-c.driverTimeoutNs/1_000_000-1)
+
+	c.DoWork()
+
+	if !c.isTerminated() {
+		t.Fatal("conductor not terminated by stale driver heartbeat")
+	}
+	var timeoutErr *DriverTimeoutError
+	if err := c.FatalError(); !errors.As(err, &timeoutErr) {
+		t.Fatalf("FatalError: got %v, want *DriverTimeoutError", err)
+	}
+
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+	pub.conductor = c
+	if got := pub.Offer(make([]byte, 8)); got != Closed {
+		t.Errorf("Offer after driver timeout: got %d, want Closed", got)
+	}
+}
+
+func TestOnAvailableImageParsesSourceIdentity(t *testing.T) {
+	// onAvailableImage maps the log file, so back the message with a real
+	// (temp) file shaped like a driver log buffer.
+	const termLen = int32(4 * 1024)
+	logFile := filepath.Join(t.TempDir(), "image.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, int(PartitionCount*termLen)+LogMetaDataLength), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Conductor{
+		publications:  make(map[int64]*publicationState),
+		subscriptions: make(map[int64]*subscriptionState),
+	}
+	subRegID := int64(5)
+	c.subscriptions[subRegID] = &subscriptionState{correlationID: subRegID, ready: true}
+
+	// Craft an ImageBuffersReady message (io.aeron.command.
+	// ImageBuffersReadyFlyweight): the source identity is a length-prefixed
+	// ASCII string whose length prefix sits int-aligned after the log file
+	// name.
+	sourceIdentity := "aeron:udp?endpoint=192.168.0.7:40456"
+	srcOff := 32 + int(align(int32(len(logFile)), 4))
+	msg := make([]byte, srcOff+4+len(sourceIdentity))
+	binary.LittleEndian.PutUint64(msg[0:], uint64(77))            // correlationID
+	binary.LittleEndian.PutUint32(msg[8:], uint32(9))             // sessionID
+	binary.LittleEndian.PutUint32(msg[12:], uint32(1001))         // streamID
+	binary.LittleEndian.PutUint64(msg[16:], uint64(subRegID))     // subscriptionRegistrationID
+	binary.LittleEndian.PutUint32(msg[24:], ^uint32(0))           // subscriberPositionID = -1
+	binary.LittleEndian.PutUint32(msg[28:], uint32(len(logFile))) // logFileName length
+	copy(msg[32:], logFile)                                       // logFileName
+	binary.LittleEndian.PutUint32(msg[srcOff:], uint32(len(sourceIdentity)))
+	copy(msg[srcOff+4:], sourceIdentity)
+
+	c.onDriverMessage(RespOnAvailableImage, msg, 0, int32(len(msg)))
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sub := c.subscriptions[subRegID]
+	if len(sub.images) != 1 {
+		t.Fatalf("images: got %d, want 1", len(sub.images))
+	}
+	img := sub.images[0]
+	t.Cleanup(func() {
+		if err := img.LogBuffers.Close(); err != nil {
+			t.Errorf("close image log buffers: %v", err)
+		}
+	})
+	if img.SourceIdentity != sourceIdentity {
+		t.Errorf("SourceIdentity: got %q, want %q", img.SourceIdentity, sourceIdentity)
+	}
+	if img.CorrelationID != 77 || img.SessionID != 9 {
+		t.Errorf("image identity fields: got corrID=%d sessionID=%d", img.CorrelationID, img.SessionID)
+	}
 }
 
 func TestOnNewPublicationShortMessage(t *testing.T) {
