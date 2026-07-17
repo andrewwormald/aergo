@@ -94,9 +94,11 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		}, remaining)
 
 		// Advance even when only padding was consumed (fragments == 0 but
-		// the offset moved) so the reader can cross a term boundary.
+		// the offset moved) so the reader can cross a term boundary. Every
+		// advance is also published to the driver's subscriber position
+		// counter so flow control does not stall the publication.
 		if newOffset > termOffset {
-			img.subscriberPosition = computePosition(termID, newOffset, termLen, initialTermID)
+			img.updatePosition(computePosition(termID, newOffset, termLen, initialTermID))
 		}
 
 		totalFragments += fragments

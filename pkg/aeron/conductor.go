@@ -54,10 +54,27 @@ type Image struct {
 	SessionID          int32
 	CorrelationID      int64
 	LogBuffers         *LogBuffers
-	SubscriberPos      int32 // counter ID for position tracking
+	SubscriberPos      int32 // driver-allocated subscriber position counter ID
 	JoinPosition       int64
 	SourceIdentity     string
 	subscriberPosition int64 // current read position (internal)
+
+	// counterValues is the driver's counter values buffer. The subscriber
+	// position counter at SubscriberPos must be updated on every position
+	// advance so the driver's flow control sees this subscriber consuming;
+	// otherwise the publication stalls at joinPosition + termLength/2.
+	counterValues *AtomicBuffer
+}
+
+// updatePosition records a new subscriber position and publishes it to the
+// driver's subscriber position counter with an ordered store. A nil counter
+// values buffer or negative counter ID (in-memory tests) skips the counter
+// write; the internal position still advances.
+func (img *Image) updatePosition(position int64) {
+	img.subscriberPosition = position
+	if img.counterValues != nil && img.SubscriberPos >= 0 {
+		img.counterValues.PutInt64Ordered(img.SubscriberPos*CounterValueLength, position)
+	}
 }
 
 // Context holds configuration for the client conductor.
@@ -350,8 +367,18 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	if len(msg) >= 32+int(logFileLen) {
 		logFile = string(msg[32 : 32+logFileLen])
 	}
+	// The driver allocates a subscriber position counter per image and
+	// initialises it to the stream join position. Adopt that as the initial
+	// read position; Poll ordered-updates the counter as it consumes so the
+	// driver's flow control tracks this subscriber (see Image.updatePosition).
+	var counterValues *AtomicBuffer
+	if c.cnc != nil {
+		counterValues = c.cnc.CounterValues
+	}
 	joinPos := int64(0)
-	_ = corrID
+	if counterValues != nil && subPosID >= 0 {
+		joinPos = counterValues.GetInt64Volatile(subPosID * CounterValueLength)
+	}
 
 	lb, err := MapLogBuffers(logFile)
 	if err != nil {
@@ -360,11 +387,13 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	}
 
 	img := &Image{
-		SessionID:     sessionID,
-		CorrelationID: corrID,
-		LogBuffers:    lb,
-		SubscriberPos: subPosID,
-		JoinPosition:  joinPos,
+		SessionID:          sessionID,
+		CorrelationID:      corrID,
+		LogBuffers:         lb,
+		SubscriberPos:      subPosID,
+		JoinPosition:       joinPos,
+		subscriberPosition: joinPos,
+		counterValues:      counterValues,
 	}
 
 	c.mu.Lock()
