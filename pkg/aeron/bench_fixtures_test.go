@@ -82,6 +82,18 @@ func setInMemPosLimit(pub *Publication, limit int64) {
 	pub.counterValues.PutInt64Ordered(pub.posLimitCounterID*CounterValueLength, limit)
 }
 
+// setInMemSubscriberPosCounter attaches a stubbed counter values buffer to
+// the subscription's single image, mirroring the driver-allocated subscriber
+// position counter. Returns the buffer so tests can assert the counter slot
+// at counterID*CounterValueLength.
+func setInMemSubscriberPosCounter(sub *Subscription, counterID int32) *AtomicBuffer {
+	counterValues := NewAtomicBuffer(make([]byte, (counterID+1)*CounterValueLength))
+	img := sub.conductor.subscriptions[sub.registrationID].images[0]
+	img.SubscriberPos = counterID
+	img.counterValues = counterValues
+	return counterValues
+}
+
 // newInMemSubscription builds a Subscription with a single ready Image
 // pointing at the supplied LogBuffers.
 func newInMemSubscription(lb *LogBuffers, streamID int32) *Subscription {
