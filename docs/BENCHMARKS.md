@@ -14,7 +14,7 @@ make bench              # full baseline (10 counts × 2s) → bench/baseline.txt
 To target one benchmark:
 
 ```sh
-go test -bench=BenchmarkPublicationOffer -benchmem ./pkg/aeron/
+go test -bench=BenchmarkPublicationOffer -benchmem ./pkg/
 ```
 
 ## Coverage
@@ -58,7 +58,7 @@ Convention: any PR that touches code on the hotpath should include a
 
 `BenchmarkSubscriptionPoll` and `BenchmarkEndToEndSendReceive` will both
 report non-zero `allocs/op`. That comes from
-`pkg/aeron/subscription.go`'s fragment handler doing
+`pkg/subscription.go`'s fragment handler doing
 `payload := make([]byte, length)` per fragment. It is real and intentional to
 surface — the baseline exists so this allocation (and any others) can be
 measured before and after future optimisations.
