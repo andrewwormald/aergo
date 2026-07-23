@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"time"
 
-	aeron "github.com/andrewwormald/aergo/pkg/aeron"
+	aeron "github.com/andrewwormald/aergo/pkg"
 )
 
 // Cluster is the interface for sending and receiving messages on an Aeron cluster.

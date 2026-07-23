@@ -26,7 +26,7 @@ Built for low-latency Go services that need Aeron's shared-memory transport with
 
 ```go
 import (
-    "github.com/andrewwormald/aergo/pkg/aeron"
+    "github.com/andrewwormald/aergo/pkg"
     "github.com/andrewwormald/aergo/pkg/cluster"
 )
 
@@ -62,7 +62,7 @@ go run ./cmd/aergo -dir /dev/shm/aeron-<user> # use the same path
 ```
 syscall.Mmap(cnc.dat)
     |
-pkg/aeron           -- pure Go shared memory protocol
+pkg                 -- pure Go shared memory protocol (package aeron)
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription

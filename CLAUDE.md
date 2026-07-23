@@ -33,7 +33,7 @@ go test ./...
 ```
 syscall.Mmap(cnc.dat)
     |
-pkg/aeron           -- pure Go shared memory protocol
+pkg                 -- pure Go shared memory protocol (package aeron)
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
