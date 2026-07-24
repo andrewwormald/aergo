@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestProtocolSemanticVersion(t *testing.T) {
+	// Must match Java's AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION =
+	// SemanticVersion.compose(0, 3, 0), and must differ from SchemaVersion --
+	// these are distinct fields with distinct meanings.
+	if ProtocolSemanticVersion != 0x000300 {
+		t.Fatalf("expected protocol semantic version 0x000300, got 0x%06x", ProtocolSemanticVersion)
+	}
+	if ProtocolSemanticVersion == int32(SchemaVersion) {
+		t.Fatalf("ProtocolSemanticVersion must not equal SchemaVersion")
+	}
+}
+
 func TestSessionMessageHeaderRoundTrip(t *testing.T) {
 	buf := make([]byte, 256)
 	msg := SessionMessageHeader{
