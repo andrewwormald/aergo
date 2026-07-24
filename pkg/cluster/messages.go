@@ -147,14 +147,16 @@ func (m *SessionEvent) DecodeWithBlockLength(buf []byte, offset int, blockLength
 //   offset 12: Version          int32
 //
 // Variable fields:
-//   ResponseChannel (var string)
+//   ResponseChannel     (var string)
+//   EncodedCredentials  (var data)
 // ---------------------------------------------------------------------------
 
 type SessionConnectRequest struct {
-	CorrelationId    int64
-	ResponseStreamId int32
-	Version          int32
-	ResponseChannel  string
+	CorrelationId      int64
+	ResponseStreamId   int32
+	Version            int32
+	ResponseChannel    string
+	EncodedCredentials []byte
 }
 
 const sessionConnectRequestBlockLength = 16
@@ -173,6 +175,9 @@ func (m *SessionConnectRequest) Encode(buf []byte, offset int) int {
 	putInt32(buf, base+12, m.Version)
 	varOffset := base + sessionConnectRequestBlockLength
 	varN := putVarString(buf, varOffset, m.ResponseChannel)
+	varOffset += varN
+	credN := putVarString(buf, varOffset, string(m.EncodedCredentials))
+	varN += credN
 	return n + sessionConnectRequestBlockLength + varN
 }
 
@@ -183,6 +188,10 @@ func (m *SessionConnectRequest) Decode(buf []byte, offset int) int {
 	varOffset := offset + sessionConnectRequestBlockLength
 	ch, varN := getVarString(buf, varOffset)
 	m.ResponseChannel = ch
+	varOffset += varN
+	creds, credN := getVarString(buf, varOffset)
+	m.EncodedCredentials = []byte(creds)
+	varN += credN
 	return sessionConnectRequestBlockLength + varN
 }
 
