@@ -17,7 +17,11 @@ const (
 	CounterRecordAllocated = 1
 	CounterRecordUnused    = 0
 
-	HeartbeatTypeID = 11 // AeronCounters.DRIVER_HEARTBEAT_TYPE_ID
+	// AeronCounters.DRIVER_HEARTBEAT_TYPE_ID: per-client heartbeat counters
+	// keyed by registration id. The driver has no heartbeat counter of its
+	// own — its liveness signal is the to-driver ring buffer's
+	// consumer-heartbeat trailer field (see MappedCnc.DriverHeartbeat).
+	HeartbeatTypeID = 11
 )
 
 // FindHeartbeatCounter scans the counter metadata buffer for the heartbeat
