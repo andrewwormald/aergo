@@ -24,7 +24,7 @@ const (
 
 	// Frame types
 	FrameTypePadding = 0x00
-	FrameTypeData    = 0x06
+	FrameTypeData    = 0x01
 
 	// Fragment flags
 	FlagBeginFrag = 0x80
