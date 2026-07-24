@@ -283,7 +283,7 @@ func (c *AeronCluster) sendConnectRequest() int {
 	req := SessionConnectRequest{
 		CorrelationId:      c.correlationId,
 		ResponseStreamId:   c.cfg.EgressStreamId,
-		Version:            int32(SchemaVersion),
+		Version:            ProtocolSemanticVersion,
 		ResponseChannel:    c.cfg.EgressChannel,
 		EncodedCredentials: nil,
 	}

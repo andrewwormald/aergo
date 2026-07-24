@@ -18,6 +18,13 @@ const (
 	SchemaVersion uint16 = 8
 )
 
+// ProtocolSemanticVersion is the client protocol semantic version sent in
+// SessionConnectRequest.Version, matching Java's
+// AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION =
+// SemanticVersion.compose(0, 3, 0). It is distinct from SchemaVersion, which
+// is the SBE schema version used in message headers.
+const ProtocolSemanticVersion int32 = 0x000300
+
 // EventCode represents the cluster session event codes.
 type EventCode int32
 
