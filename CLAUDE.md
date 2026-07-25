@@ -33,12 +33,12 @@ go test ./...
 ```
 syscall.Mmap(cnc.dat)
     |
-. (repo root)       -- pure Go shared memory protocol (package aergo)
+aergo (repo root)   -- pure Go shared memory protocol (package aergo)
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
     |
-cluster         -- Cluster interface + AeronCluster state machine
+aergo/cluster       -- Cluster interface + AeronCluster state machine
                        SBE codecs, auto-reconnect, graceful shutdown
 ```
 
@@ -48,3 +48,4 @@ cluster         -- Cluster interface + AeronCluster state machine
 - Aeron-idiomatic naming: `Aeron`, `Connect`, `Context`, `Publication`, `Subscription`, `Image`, `FragmentHandler`, `Conductor`
 - Zero external dependencies -- pure Go standard library only
 - All shared memory access via `sync/atomic` and `unsafe.Pointer` on mmap'd files
+- No internal logging: the library never writes to a process-global logger. Synchronous failures are returned as errors; the poll-driven `cluster` state machine (which has no synchronous caller to return to) reports failures via `EgressListener.OnError` instead. Callers decide whether/where to log.

@@ -39,7 +39,7 @@ pub.Offer([]byte("hello"))
 
 // Create a subscription
 sub, err := client.AddSubscription("aeron:udp?endpoint=localhost:40123", 1001)
-sub.Poll(func(buffer []byte, header *aeron.Header) {
+sub.Poll(func(buffer []byte, header *aergo.Header) {
     fmt.Println("received:", string(buffer))
 }, 10)
 ```
@@ -62,12 +62,12 @@ go run ./cmd/aergo -dir /dev/shm/aeron-<user> # use the same path
 ```
 syscall.Mmap(cnc.dat)
     |
-. (repo root)       -- pure Go shared memory protocol (package aergo)
+aergo (repo root)   -- pure Go shared memory protocol (package aergo)
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
     |
-cluster         -- Cluster interface + AeronCluster state machine
+aergo/cluster       -- Cluster interface + AeronCluster state machine
                        SBE codecs, auto-reconnect, graceful shutdown
 ```
 
