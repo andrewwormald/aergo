@@ -3,7 +3,6 @@ package aergo
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -334,7 +333,6 @@ func (c *Conductor) terminate(err error) {
 	c.fatalErr = err
 	c.errors = append(c.errors, err)
 	c.mu.Unlock()
-	log.Printf("native: %v", err)
 }
 
 // isTerminated reports whether the conductor is closed-equivalent.
@@ -419,13 +417,16 @@ func (c *Conductor) onNewPublication(msg []byte) {
 
 	if logFile != "" {
 		lb, err := MapLogBuffers(logFile)
-		if err != nil {
-			log.Printf("native: failed to map log buffers %s: %v", logFile, err)
-		} else if pub != nil {
-			c.mu.Lock()
-			pub.logBuffers = lb
-			c.mu.Unlock()
+		c.mu.Lock()
+		if pub != nil {
+			if err != nil {
+				pub.err = fmt.Errorf("map log buffers %s: %w", logFile, err)
+				pub.ready = false
+			} else {
+				pub.logBuffers = lb
+			}
 		}
+		c.mu.Unlock()
 	}
 }
 
@@ -497,7 +498,6 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 
 	lb, err := MapLogBuffers(logFile)
 	if err != nil {
-		log.Printf("native: failed to map image log buffers %s: %v", logFile, err)
 		return
 	}
 
@@ -577,6 +577,4 @@ func (c *Conductor) onError(msg []byte) {
 	}
 	c.errors = append(c.errors, err)
 	c.mu.Unlock()
-
-	log.Printf("native: %v", err)
 }

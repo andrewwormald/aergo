@@ -102,5 +102,9 @@ func (l *clusterListener) OnChallenge(c aeroncluster.Cluster, challenge *aeroncl
 	return nil
 }
 
+func (l *clusterListener) OnError(c aeroncluster.Cluster, err error) {
+	log.Printf("cluster error: %v", err)
+}
+
 // Suppress unused import
 var _ = aergo.Connect

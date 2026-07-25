@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"fmt"
-	"log"
 	"runtime"
 	"time"
 
@@ -223,7 +222,7 @@ func (c *AeronCluster) Close() error {
 func (c *AeronCluster) createEgressSubscription() int {
 	sub, err := c.aeronClient.AddSubscription(c.cfg.EgressChannel, c.cfg.EgressStreamId)
 	if err != nil {
-		log.Printf("aergo: failed to create egress subscription: %v", err)
+		c.cfg.Listener.OnError(c, fmt.Errorf("create egress subscription: %w", err))
 		return 0
 	}
 	c.egressSub = sub
@@ -238,24 +237,20 @@ func (c *AeronCluster) awaitSubscriptionConnected() int {
 }
 
 func (c *AeronCluster) createIngressPublications() int {
-	log.Printf("aergo: creating ingress publications for %d members", len(c.cfg.Members))
 	c.ingressPubs = make([]*aergo.Publication, 0, len(c.cfg.Members))
 	for _, member := range c.cfg.Members {
 		uri := fmt.Sprintf("aeron:udp?endpoint=%s", member.Endpoint)
 		if c.cfg.IngressChannel != "" {
 			uri = c.cfg.IngressChannel
 		}
-		log.Printf("aergo: AddPublication uri=%q streamID=%d", uri, c.cfg.IngressStreamId)
 		pub, err := c.aeronClient.AddPublication(uri, c.cfg.IngressStreamId)
 		if err != nil {
-			log.Printf("aergo: failed to create ingress publication to member %d: %v", member.MemberId, err)
+			c.cfg.Listener.OnError(c, fmt.Errorf("create ingress publication to member %d: %w", member.MemberId, err))
 			continue
 		}
-		log.Printf("aergo: publication created, sessionID=%d streamID=%d", pub.SessionID(), pub.StreamID())
 		c.ingressPubs = append(c.ingressPubs, pub)
 	}
 	if len(c.ingressPubs) == 0 {
-		log.Printf("aergo: no ingress publications created")
 		c.handleDisconnect("no ingress publications")
 		return 0
 	}
@@ -271,7 +266,6 @@ func (c *AeronCluster) awaitPublicationConnected() int {
 		}
 	}
 	if c.isConnectTimedOut() {
-		log.Printf("aergo: publication connect timeout")
 		c.handleDisconnect("publication connect timeout")
 	}
 	return 0
@@ -321,11 +315,8 @@ func (c *AeronCluster) awaitConnectReply() int {
 					c.state = StateConnected
 					c.reconnectAttempts = 0
 					c.reconnectBackoff = c.cfg.ReconnectBackoffMs
-					log.Printf("aergo: connected session=%d leader=%d term=%d",
-						c.clusterSessionId, c.leaderMemberId, c.leadershipTermId)
 					c.cfg.Listener.OnSessionEvent(c, &evt)
 				} else {
-					log.Printf("aergo: connect rejected: code=%d detail=%s", evt.Code, evt.Detail)
 					c.cfg.Listener.OnSessionEvent(c, &evt)
 					c.handleDisconnect(fmt.Sprintf("rejected: %s", evt.Detail))
 				}
@@ -335,7 +326,6 @@ func (c *AeronCluster) awaitConnectReply() int {
 	}, 10)
 
 	if c.state == StateAwaitConnectReply && c.isConnectTimedOut() {
-		log.Printf("aergo: connect reply timeout")
 		c.handleDisconnect("connect reply timeout")
 	}
 	return workCount
@@ -364,7 +354,6 @@ func (c *AeronCluster) pollConnected() int {
 			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			c.cfg.Listener.OnSessionEvent(c, &evt)
 			if evt.Code == EventCodeClosed {
-				log.Printf("aergo: session closed by cluster: %s", evt.Detail)
 				c.handleDisconnect("session closed by cluster")
 			}
 
@@ -373,13 +362,11 @@ func (c *AeronCluster) pollConnected() int {
 			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 			c.leaderMemberId = evt.LeaderMemberId
 			c.leadershipTermId = evt.LeadershipTermId
-			log.Printf("aergo: new leader: member=%d term=%d", evt.LeaderMemberId, evt.LeadershipTermId)
 			c.cfg.Listener.OnNewLeader(c, &evt)
 
 		case TemplateIdChallenge:
 			var ch Challenge
 			ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
-			log.Printf("aergo: received challenge (correlationId=%d)", ch.CorrelationId)
 			c.handleChallenge(&ch)
 
 		default:
@@ -409,7 +396,7 @@ func (c *AeronCluster) pollClosing() int {
 			var evt SessionEvent
 			evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
 			if evt.Code == EventCodeClosed {
-				log.Printf("aergo: graceful close acknowledged")
+				c.cfg.Listener.OnSessionEvent(c, &evt)
 			}
 		}
 		workCount++
@@ -426,14 +413,12 @@ func (c *AeronCluster) sendCloseRequest() {
 	n := req.Encode(c.sendBuf, 0)
 	if pub := c.leaderPublication(); pub != nil {
 		pub.Offer(c.sendBuf[:n])
-		log.Printf("aergo: sent close request for session=%d", c.clusterSessionId)
 	}
 }
 
 func (c *AeronCluster) handleChallenge(ch *Challenge) {
 	responseData := c.cfg.Listener.OnChallenge(c, ch)
 	if responseData == nil {
-		log.Printf("aergo: challenge rejected by listener (no response data)")
 		return
 	}
 	resp := ChallengeResponse{
@@ -444,10 +429,8 @@ func (c *AeronCluster) handleChallenge(ch *Challenge) {
 	n := resp.Encode(c.sendBuf, 0)
 	if pub := c.leaderPublication(); pub != nil {
 		result := pub.Offer(c.sendBuf[:n])
-		if result > 0 {
-			log.Printf("aergo: sent challenge response (correlationId=%d)", ch.CorrelationId)
-		} else {
-			log.Printf("aergo: failed to send challenge response: %d", result)
+		if result <= 0 {
+			c.cfg.Listener.OnError(c, fmt.Errorf("send challenge response: offer result=%d", result))
 		}
 	}
 }
@@ -464,7 +447,7 @@ func (c *AeronCluster) sendKeepAlive() {
 }
 
 func (c *AeronCluster) handleDisconnect(reason string) {
-	log.Printf("aergo: disconnected: %s", reason)
+	c.cfg.Listener.OnError(c, fmt.Errorf("disconnected: %s", reason))
 	if c.egressSub != nil {
 		c.egressSub.Close()
 		c.egressSub = nil
@@ -476,7 +459,7 @@ func (c *AeronCluster) handleDisconnect(reason string) {
 
 	if c.cfg.AutoReconnect {
 		if c.cfg.MaxReconnectAttempts > 0 && c.reconnectAttempts >= c.cfg.MaxReconnectAttempts {
-			log.Printf("aergo: max reconnect attempts (%d) reached", c.cfg.MaxReconnectAttempts)
+			c.cfg.Listener.OnError(c, fmt.Errorf("max reconnect attempts (%d) reached, giving up", c.cfg.MaxReconnectAttempts))
 			c.state = StateClosed
 			return
 		}
@@ -496,7 +479,6 @@ func (c *AeronCluster) tryReconnect() int {
 		return 0
 	}
 	c.reconnectAttempts++
-	log.Printf("aergo: reconnect attempt %d (backoff=%dms)", c.reconnectAttempts, c.reconnectBackoff)
 	c.reconnectBackoff = c.reconnectBackoff * 2
 	if c.reconnectBackoff > c.cfg.MaxReconnectBackoffMs {
 		c.reconnectBackoff = c.cfg.MaxReconnectBackoffMs

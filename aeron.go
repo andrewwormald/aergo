@@ -1,8 +1,8 @@
 package aergo
 
 import (
+	"errors"
 	"fmt"
-	"log"
 	"time"
 )
 
@@ -57,7 +57,7 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 	// subsequent Add* would hang until its wait timeout.
 	if err := conductor.checkDriverLiveness(time.Now().UnixMilli()); err != nil {
 		if closeErr := conductor.Close(); closeErr != nil {
-			log.Printf("aeron: close after failed liveness check: %v", closeErr)
+			return nil, errors.Join(err, fmt.Errorf("close after failed liveness check: %w", closeErr))
 		}
 		return nil, err
 	}
@@ -180,8 +180,6 @@ func (c *Aeron) tryFindHeartbeatCounter() {
 	cond.heartbeatCounterId = FindHeartbeatCounter(
 		cond.cnc.CounterMetadata, cond.cnc.CounterValues, cond.clientID)
 	if cond.heartbeatCounterId >= 0 {
-		log.Printf("aeron: found heartbeat counter=%d for clientID=%d, updating immediately",
-			cond.heartbeatCounterId, cond.clientID)
 		UpdateHeartbeatCounter(cond.cnc.CounterValues, cond.heartbeatCounterId)
 	}
 }
