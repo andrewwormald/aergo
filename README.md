@@ -26,12 +26,12 @@ Built for low-latency Go services that need Aeron's shared-memory transport with
 
 ```go
 import (
-    "github.com/andrewwormald/aergo/pkg"
-    "github.com/andrewwormald/aergo/pkg/cluster"
+    "github.com/andrewwormald/aergo"
+    "github.com/andrewwormald/aergo/cluster"
 )
 
 // Connect to the media driver
-client, err := aeron.Connect(aeron.WithDir("/dev/shm/aeron-user"))
+client, err := aergo.Connect(aergo.WithDir("/dev/shm/aeron-user"))
 
 // Create a publication
 pub, err := client.AddPublication("aeron:udp?endpoint=localhost:40123", 1001)
@@ -39,7 +39,7 @@ pub.Offer([]byte("hello"))
 
 // Create a subscription
 sub, err := client.AddSubscription("aeron:udp?endpoint=localhost:40123", 1001)
-sub.Poll(func(buffer []byte, header *aeron.Header) {
+sub.Poll(func(buffer []byte, header *aergo.Header) {
     fmt.Println("received:", string(buffer))
 }, 10)
 ```
@@ -62,12 +62,12 @@ go run ./cmd/aergo -dir /dev/shm/aeron-<user> # use the same path
 ```
 syscall.Mmap(cnc.dat)
     |
-pkg                 -- pure Go shared memory protocol (package aeron)
+aergo (repo root)   -- pure Go shared memory protocol (package aergo)
     |                   AtomicBuffer, ManyToOneRingBuffer,
     |                   BroadcastReceiver, Conductor,
     |                   Publication, Subscription
     |
-pkg/cluster         -- Cluster interface + AeronCluster state machine
+aergo/cluster       -- Cluster interface + AeronCluster state machine
                        SBE codecs, auto-reconnect, graceful shutdown
 ```
 

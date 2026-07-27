@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	aeron "github.com/andrewwormald/aergo/pkg"
-	aeroncluster "github.com/andrewwormald/aergo/pkg/cluster"
+	"github.com/andrewwormald/aergo"
+	aeroncluster "github.com/andrewwormald/aergo/cluster"
 )
 
 var (
@@ -102,5 +102,9 @@ func (l *clusterListener) OnChallenge(c aeroncluster.Cluster, challenge *aeroncl
 	return nil
 }
 
+func (l *clusterListener) OnError(c aeroncluster.Cluster, err error) {
+	log.Printf("cluster error: %v", err)
+}
+
 // Suppress unused import
-var _ = aeron.Connect
+var _ = aergo.Connect
