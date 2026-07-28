@@ -24,11 +24,10 @@ Built for low-latency Go services that need Aeron's shared-memory transport with
 
 ## Quick Start
 
+A single import gets you both the raw pub/sub client and the cluster client:
+
 ```go
-import (
-    "github.com/andrewwormald/aergo"
-    "github.com/andrewwormald/aergo/cluster"
-)
+import "github.com/andrewwormald/aergo"
 
 // Connect to the media driver
 client, err := aergo.Connect(aergo.WithDir("/dev/shm/aeron-user"))
@@ -42,6 +41,21 @@ sub, err := client.AddSubscription("aeron:udp?endpoint=localhost:40123", 1001)
 sub.Poll(func(buffer []byte, header *aergo.Header) {
     fmt.Println("received:", string(buffer))
 }, 10)
+```
+
+Most consumers want the cluster client rather than raw pub/sub:
+
+```go
+cfg := aergo.DefaultClusterConfig()
+cfg.AeronDir = "/dev/shm/aeron-user"
+cfg.Members = []aergo.ClusterMember{{MemberId: 0, Endpoint: "localhost:10000"}}
+
+cc, err := aergo.NewCluster(cfg)
+cc.Connect()
+for cc.State() != aergo.StateConnected {
+    cc.Poll()
+}
+cc.Offer([]byte("hello cluster"))
 ```
 
 ## Building the Media Driver
@@ -62,13 +76,14 @@ go run ./cmd/aergo -dir /dev/shm/aeron-<user> # use the same path
 ```
 syscall.Mmap(cnc.dat)
     |
-aergo (repo root)   -- pure Go shared memory protocol (package aergo)
-    |                   AtomicBuffer, ManyToOneRingBuffer,
-    |                   BroadcastReceiver, Conductor,
-    |                   Publication, Subscription
+package aergo (repo root, single package)
+    |-- AtomicBuffer, ManyToOneRingBuffer,   -- pure Go shared memory protocol
+    |   BroadcastReceiver, Conductor,
+    |   Publication, Subscription
     |
-aergo/cluster       -- Cluster interface + AeronCluster state machine
-                       SBE codecs, auto-reconnect, graceful shutdown
+    `-- Cluster, AeronCluster, ClusterConfig -- Aeron cluster protocol built on
+        SBE codecs, EgressListener              the above (session connect,
+                                                 leader tracking, reconnection)
 ```
 
 ### How it works

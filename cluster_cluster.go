@@ -1,11 +1,9 @@
-package cluster
+package aergo
 
 import (
 	"fmt"
 	"runtime"
 	"time"
-
-	"github.com/andrewwormald/aergo"
 )
 
 // Cluster is the interface for sending and receiving messages on an Aeron cluster.
@@ -13,7 +11,7 @@ type Cluster interface {
 	Connect()
 	Poll() int
 	Offer(buf []byte) int64
-	State() State
+	State() ClusterState
 	GracefulClose()
 	Close() error
 	ClusterSessionId() int64
@@ -21,11 +19,11 @@ type Cluster interface {
 	LeaderMemberId() int32
 }
 
-// State represents the cluster client connection state.
-type State int
+// ClusterState represents the cluster client connection state.
+type ClusterState int
 
 const (
-	StateDisconnected State = iota
+	StateDisconnected ClusterState = iota
 	StateCreateEgressSubscription
 	StateAwaitSubscriptionConnected
 	StateCreateIngressPublications
@@ -52,7 +50,7 @@ type ClusterMember struct {
 	Endpoint string
 }
 
-type Config struct {
+type ClusterConfig struct {
 	IngressChannel        string
 	IngressStreamId       int32
 	EgressChannel         string
@@ -70,8 +68,8 @@ type Config struct {
 	LockOSThread          bool
 }
 
-func DefaultConfig() Config {
-	return Config{
+func DefaultClusterConfig() ClusterConfig {
+	return ClusterConfig{
 		IngressStreamId:       DefaultIngressStreamId,
 		EgressChannel:         DefaultEgressChannel,
 		EgressStreamId:        DefaultEgressStreamId,
@@ -89,17 +87,17 @@ func DefaultConfig() Config {
 var _ Cluster = (*AeronCluster)(nil)
 
 type AeronCluster struct {
-	cfg Config
+	cfg ClusterConfig
 
-	aeronClient *aergo.Aeron
-	egressSub   *aergo.Subscription
-	ingressPubs []*aergo.Publication
+	aeronClient *Aeron
+	egressSub   *Subscription
+	ingressPubs []*Publication
 
 	leaderMemberId    int32
 	leadershipTermId  int64
 	clusterSessionId  int64
 	correlationId     int64
-	state             State
+	state             ClusterState
 	lastKeepAliveMs   int64
 	sendBuf           []byte
 	connectStartMs    int64
@@ -109,8 +107,8 @@ type AeronCluster struct {
 	osThreadLocked    bool
 }
 
-func New(cfg Config) (*AeronCluster, error) {
-	ac, err := aergo.Connect(aergo.WithDir(cfg.AeronDir))
+func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
+	ac, err := Connect(WithDir(cfg.AeronDir))
 	if err != nil {
 		return nil, fmt.Errorf("create aeron client: %w", err)
 	}
@@ -168,7 +166,7 @@ func (c *AeronCluster) Poll() int {
 
 func (c *AeronCluster) Offer(buf []byte) int64 {
 	if c.state != StateConnected {
-		return aergo.NotConnected
+		return NotConnected
 	}
 
 	smh := SessionMessageHeader{
@@ -180,7 +178,7 @@ func (c *AeronCluster) Offer(buf []byte) int64 {
 
 	pub := c.leaderPublication()
 	if pub == nil {
-		return aergo.NotConnected
+		return NotConnected
 	}
 	return pub.Offer(c.sendBuf[:n+len(buf)])
 }
@@ -194,7 +192,7 @@ func (c *AeronCluster) GracefulClose() {
 	}
 }
 
-func (c *AeronCluster) State() State            { return c.state }
+func (c *AeronCluster) State() ClusterState     { return c.state }
 func (c *AeronCluster) LeaderMemberId() int32   { return c.leaderMemberId }
 func (c *AeronCluster) ClusterSessionId() int64 { return c.clusterSessionId }
 func (c *AeronCluster) LeadershipTermId() int64 { return c.leadershipTermId }
@@ -237,7 +235,7 @@ func (c *AeronCluster) awaitSubscriptionConnected() int {
 }
 
 func (c *AeronCluster) createIngressPublications() int {
-	c.ingressPubs = make([]*aergo.Publication, 0, len(c.cfg.Members))
+	c.ingressPubs = make([]*Publication, 0, len(c.cfg.Members))
 	for _, member := range c.cfg.Members {
 		uri := fmt.Sprintf("aeron:udp?endpoint=%s", member.Endpoint)
 		if c.cfg.IngressChannel != "" {
@@ -296,7 +294,7 @@ func (c *AeronCluster) sendConnectRequest() int {
 
 func (c *AeronCluster) awaitConnectReply() int {
 	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *aergo.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *Header) {
 		if len(buffer) < HeaderSize {
 			return
 		}
@@ -333,7 +331,7 @@ func (c *AeronCluster) awaitConnectReply() int {
 
 func (c *AeronCluster) pollConnected() int {
 	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *aergo.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *Header) {
 		if len(buffer) < HeaderSize {
 			return
 		}
@@ -386,7 +384,7 @@ func (c *AeronCluster) pollConnected() int {
 
 func (c *AeronCluster) pollClosing() int {
 	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *aergo.Header) {
+	c.egressSub.Poll(func(buffer []byte, header *Header) {
 		if len(buffer) < HeaderSize {
 			return
 		}
@@ -492,7 +490,7 @@ func (c *AeronCluster) isConnectTimedOut() bool {
 	return time.Now().UnixMilli()-c.connectStartMs > c.cfg.ConnectTimeoutMs
 }
 
-func (c *AeronCluster) leaderPublication() *aergo.Publication {
+func (c *AeronCluster) leaderPublication() *Publication {
 	if len(c.ingressPubs) == 0 {
 		return nil
 	}
