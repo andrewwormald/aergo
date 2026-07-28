@@ -33,19 +33,21 @@ go test ./...
 ```
 syscall.Mmap(cnc.dat)
     |
-aergo (repo root)   -- pure Go shared memory protocol (package aergo)
-    |                   AtomicBuffer, ManyToOneRingBuffer,
-    |                   BroadcastReceiver, Conductor,
-    |                   Publication, Subscription
+package aergo (repo root, single package)
+    |-- AtomicBuffer, ManyToOneRingBuffer,   -- pure Go shared memory protocol
+    |   BroadcastReceiver, Conductor,
+    |   Publication, Subscription
     |
-aergo/cluster       -- Cluster interface + AeronCluster state machine
-                       SBE codecs, auto-reconnect, graceful shutdown
+    `-- Cluster, AeronCluster, ClusterConfig -- Aeron cluster protocol built on
+        SBE codecs, EgressListener              the above (session connect,
+                                                 leader tracking, reconnection)
 ```
 
 ## Key conventions
 
-- `cluster.Cluster` interface decouples consumers from the concrete `AeronCluster` type
+- Single package (`aergo`) at repo root -- no `pkg/` or `cluster/` subpackages. Cluster-specific exports (`ClusterConfig`, `ClusterState`, `NewCluster`, ...) are prefixed to stay unambiguous once merged into the flat namespace; types that are already unambiguous in context (`SessionEvent`, `Challenge`, `EgressListener`) are not.
+- `Cluster` interface decouples consumers from the concrete `AeronCluster` type
 - Aeron-idiomatic naming: `Aeron`, `Connect`, `Context`, `Publication`, `Subscription`, `Image`, `FragmentHandler`, `Conductor`
 - Zero external dependencies -- pure Go standard library only
 - All shared memory access via `sync/atomic` and `unsafe.Pointer` on mmap'd files
-- No internal logging: the library never writes to a process-global logger. Synchronous failures are returned as errors; the poll-driven `cluster` state machine (which has no synchronous caller to return to) reports failures via `EgressListener.OnError` instead. Callers decide whether/where to log.
+- No internal logging: the library never writes to a process-global logger. Synchronous failures are returned as errors; the poll-driven cluster state machine (which has no synchronous caller to return to) reports failures via `EgressListener.OnError` instead. Callers decide whether/where to log.

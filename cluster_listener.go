@@ -1,4 +1,4 @@
-package cluster
+package aergo
 
 // EgressListener receives messages from the Aeron cluster.
 type EgressListener interface {

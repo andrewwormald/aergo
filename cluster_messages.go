@@ -1,4 +1,4 @@
-package cluster
+package aergo
 
 // Aeron cluster protocol message template IDs.
 const (
