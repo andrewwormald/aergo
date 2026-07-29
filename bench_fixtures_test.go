@@ -96,19 +96,23 @@ func setInMemSubscriberPosCounter(sub *Subscription, counterID int32) *AtomicBuf
 }
 
 // newInMemCnc builds a MappedCnc backed by heap buffers (no mmap, no
-// aeronmd) with room for numCounters counters. The driver heartbeat counter
-// (counter 0) starts at zero; doctor it with setInMemDriverHeartbeat.
+// aeronmd) with room for numCounters counters. The driver heartbeat (the
+// to-driver ring buffer's consumer-heartbeat trailer field) starts at zero;
+// doctor it with setInMemDriverHeartbeat.
 func newInMemCnc(numCounters int32) *MappedCnc {
 	return &MappedCnc{
+		ToDriverBuffer:  NewAtomicBuffer(make([]byte, 1024+rbTrailerLength)),
 		CounterMetadata: NewAtomicBuffer(make([]byte, numCounters*CounterMetadataLength)),
 		CounterValues:   NewAtomicBuffer(make([]byte, numCounters*CounterValueLength)),
 	}
 }
 
-// setInMemDriverHeartbeat doctors the driver heartbeat timestamp (counter 0)
-// read by MappedCnc.DriverHeartbeat.
+// setInMemDriverHeartbeat doctors the driver keepalive timestamp (the
+// to-driver ring buffer's consumer-heartbeat trailer field) read by
+// MappedCnc.DriverHeartbeat.
 func setInMemDriverHeartbeat(cnc *MappedCnc, timestampMs int64) {
-	cnc.CounterValues.PutInt64Ordered(0, timestampMs)
+	buf := cnc.ToDriverBuffer
+	buf.PutInt64Ordered(buf.Capacity()-rbTrailerLength+rbConsumerHeartbeatOff, timestampMs)
 }
 
 // inMemBroadcast is a heap-backed to-clients broadcast buffer plus a
