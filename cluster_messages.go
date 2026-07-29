@@ -22,12 +22,11 @@ const (
 type EventCode int32
 
 const (
-	EventCodeOK             EventCode = 0
-	EventCodeError          EventCode = 1
-	EventCodeRedirect       EventCode = 2
-	EventCodeAuthentication EventCode = 3
-	EventCodeRejected       EventCode = 4
-	EventCodeClosed         EventCode = 5
+	EventCodeOK                     EventCode = 0
+	EventCodeError                  EventCode = 1
+	EventCodeRedirect               EventCode = 2
+	EventCodeAuthenticationRejected EventCode = 3
+	EventCodeClosed                 EventCode = 4
 )
 
 // ---------------------------------------------------------------------------
