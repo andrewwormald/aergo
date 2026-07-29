@@ -22,9 +22,9 @@ const (
 	FrameTermIDOff        = 20
 	FrameReservedValueOff = 24
 
-	// Frame types
+	// Frame types (Java DataHeaderFlyweight HDR_TYPE_* constants)
 	FrameTypePadding = 0x00
-	FrameTypeData    = 0x06
+	FrameTypeData    = 0x01
 
 	// Fragment flags
 	FlagBeginFrag = 0x80
