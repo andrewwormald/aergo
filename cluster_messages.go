@@ -18,6 +18,13 @@ const (
 	SchemaVersion uint16 = 8
 )
 
+// ProtocolSemanticVersion is the client protocol semantic version sent in
+// SessionConnectRequest.Version, matching Java's
+// AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION =
+// SemanticVersion.compose(0, 3, 0). It is distinct from SchemaVersion, which
+// is the SBE schema version used in message headers.
+const ProtocolSemanticVersion int32 = 0x000300
+
 // EventCode represents the cluster session event codes.
 type EventCode int32
 
@@ -151,10 +158,11 @@ func (m *SessionEvent) DecodeWithBlockLength(buf []byte, offset int, blockLength
 // ---------------------------------------------------------------------------
 
 type SessionConnectRequest struct {
-	CorrelationId    int64
-	ResponseStreamId int32
-	Version          int32
-	ResponseChannel  string
+	CorrelationId      int64
+	ResponseStreamId   int32
+	Version            int32
+	ResponseChannel    string
+	EncodedCredentials []byte
 }
 
 const sessionConnectRequestBlockLength = 16
@@ -173,6 +181,9 @@ func (m *SessionConnectRequest) Encode(buf []byte, offset int) int {
 	putInt32(buf, base+12, m.Version)
 	varOffset := base + sessionConnectRequestBlockLength
 	varN := putVarString(buf, varOffset, m.ResponseChannel)
+	varOffset += varN
+	credN := putVarString(buf, varOffset, string(m.EncodedCredentials))
+	varN += credN
 	return n + sessionConnectRequestBlockLength + varN
 }
 
@@ -183,6 +194,10 @@ func (m *SessionConnectRequest) Decode(buf []byte, offset int) int {
 	varOffset := offset + sessionConnectRequestBlockLength
 	ch, varN := getVarString(buf, varOffset)
 	m.ResponseChannel = ch
+	varOffset += varN
+	creds, credN := getVarString(buf, varOffset)
+	m.EncodedCredentials = []byte(creds)
+	varN += credN
 	return sessionConnectRequestBlockLength + varN
 }
 

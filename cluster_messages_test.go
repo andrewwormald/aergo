@@ -42,13 +42,26 @@ func TestSessionMessageHeaderRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProtocolSemanticVersion(t *testing.T) {
+	// Must match Java's AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION =
+	// SemanticVersion.compose(0, 3, 0), and must differ from SchemaVersion --
+	// these are distinct fields with distinct meanings.
+	if ProtocolSemanticVersion != 0x000300 {
+		t.Fatalf("expected protocol semantic version 0x000300, got 0x%06x", ProtocolSemanticVersion)
+	}
+	if ProtocolSemanticVersion == int32(SchemaVersion) {
+		t.Fatalf("ProtocolSemanticVersion must not equal SchemaVersion")
+	}
+}
+
 func TestSessionConnectRequestRoundTrip(t *testing.T) {
 	buf := make([]byte, 256)
 	msg := SessionConnectRequest{
-		CorrelationId:    99,
-		ResponseStreamId: 102,
-		Version:          8,
-		ResponseChannel:  "aeron:udp?endpoint=localhost:0",
+		CorrelationId:      99,
+		ResponseStreamId:   102,
+		Version:            8,
+		ResponseChannel:    "aeron:udp?endpoint=localhost:0",
+		EncodedCredentials: []byte("secret"),
 	}
 	n := msg.Encode(buf, 0)
 
@@ -74,6 +87,9 @@ func TestSessionConnectRequestRoundTrip(t *testing.T) {
 	}
 	if decoded.ResponseChannel != "aeron:udp?endpoint=localhost:0" {
 		t.Fatalf("ResponseChannel: expected 'aeron:udp?endpoint=localhost:0', got '%s'", decoded.ResponseChannel)
+	}
+	if string(decoded.EncodedCredentials) != "secret" {
+		t.Fatalf("EncodedCredentials: expected 'secret', got '%s'", decoded.EncodedCredentials)
 	}
 }
 

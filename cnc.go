@@ -123,10 +123,15 @@ func (c *MappedCnc) Close() error {
 	return nil
 }
 
-// DriverHeartbeat reads the driver's heartbeat timestamp from the CnC counters.
-// The heartbeat counter is typically counter ID 0.
+// DriverHeartbeat returns the driver's last keepalive timestamp in epoch ms.
+// The driver conductor refreshes the consumer-heartbeat field in the
+// to-driver ring buffer trailer every duty cycle; there is no driver-own
+// heartbeat counter (AeronCounters.DRIVER_HEARTBEAT_TYPE_ID counters are
+// per-client). Mirrors Java CommonContext.isDriverActive and
+// DriverProxy.timeOfLastDriverKeepaliveMs.
 func (c *MappedCnc) DriverHeartbeat() int64 {
-	return c.CounterValues.GetInt64Volatile(0)
+	buf := c.ToDriverBuffer
+	return buf.GetInt64Volatile(buf.Capacity() - rbTrailerLength + rbConsumerHeartbeatOff)
 }
 
 // ReadErrorLog reads error entries from the driver's error log buffer.

@@ -273,10 +273,11 @@ func (c *AeronCluster) sendConnectRequest() int {
 	c.correlationId = time.Now().UnixNano()
 
 	req := SessionConnectRequest{
-		CorrelationId:    c.correlationId,
-		ResponseStreamId: c.cfg.EgressStreamId,
-		Version:          int32(SchemaVersion),
-		ResponseChannel:  c.cfg.EgressChannel,
+		CorrelationId:      c.correlationId,
+		ResponseStreamId:   c.cfg.EgressStreamId,
+		Version:            ProtocolSemanticVersion,
+		ResponseChannel:    c.cfg.EgressChannel,
+		EncodedCredentials: nil,
 	}
 	n := req.Encode(c.sendBuf, 0)
 
