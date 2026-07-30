@@ -45,6 +45,11 @@ const (
 	DefaultMaxReconnectBackMs  = 30000
 )
 
+// maxRedirectAttempts bounds how many times a single connect handshake will
+// follow a REDIRECT before giving up, guarding against a pathological loop
+// if members disagree about who the leader is.
+const maxRedirectAttempts = 5
+
 type ClusterMember struct {
 	MemberId int32
 	Endpoint string
@@ -105,6 +110,7 @@ type AeronCluster struct {
 	reconnectBackoff  int64
 	lastReconnectMs   int64
 	osThreadLocked    bool
+	redirectAttempts  int
 }
 
 func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
@@ -130,6 +136,7 @@ func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
 func (c *AeronCluster) Connect() {
 	c.state = StateCreateEgressSubscription
 	c.connectStartMs = time.Now().UnixMilli()
+	c.redirectAttempts = 0
 }
 
 func (c *AeronCluster) Poll() int {
@@ -281,13 +288,15 @@ func (c *AeronCluster) sendConnectRequest() int {
 	}
 	n := req.Encode(c.sendBuf, 0)
 
-	for _, pub := range c.ingressPubs {
-		if pub.IsConnected() {
-			result := pub.Offer(c.sendBuf[:n])
-			if result > 0 {
-				c.state = StateAwaitConnectReply
-				return 1
-			}
+	// leaderPublication prefers c.leaderMemberId when known (set by a prior
+	// REDIRECT), falling back to the first connected member otherwise. The
+	// leader isn't known on the very first attempt, so any member is asked
+	// first, and later attempts target whoever REDIRECT actually named.
+	if pub := c.leaderPublication(); pub != nil && pub.IsConnected() {
+		result := pub.Offer(c.sendBuf[:n])
+		if result > 0 {
+			c.state = StateAwaitConnectReply
+			return 1
 		}
 	}
 	return 0
@@ -314,7 +323,18 @@ func (c *AeronCluster) awaitConnectReply() int {
 					c.state = StateConnected
 					c.reconnectAttempts = 0
 					c.reconnectBackoff = c.cfg.ReconnectBackoffMs
+					c.redirectAttempts = 0
 					c.cfg.Listener.OnSessionEvent(c, &evt)
+				} else if evt.Code == EventCodeRedirect && c.redirectAttempts < maxRedirectAttempts {
+					// The member we asked isn't the leader; it names the
+					// actual leader in LeaderMemberId. Retry against that
+					// member instead of treating this as a rejection —
+					// leaderPublication() (used by sendConnectRequest) picks
+					// it up via c.leaderMemberId on the next attempt.
+					c.redirectAttempts++
+					c.leaderMemberId = evt.LeaderMemberId
+					c.cfg.Listener.OnSessionEvent(c, &evt)
+					c.state = StateSendConnectRequest
 				} else {
 					c.cfg.Listener.OnSessionEvent(c, &evt)
 					c.handleDisconnect(fmt.Sprintf("rejected: %s", evt.Detail))
