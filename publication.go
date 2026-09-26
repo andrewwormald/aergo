@@ -57,14 +57,55 @@ func (p *Publication) positionLimit() int64 {
 // value of NotConnected, BackPressured, AdminAction, Closed, or
 // MaxPositionExceeded.
 func (p *Publication) Offer(buf []byte) int64 {
+	term, termOffset, status := p.claim(int32(len(buf)))
+	if status <= 0 {
+		return status
+	}
+
+	term.PutBytes(termOffset+DataFrameHeaderLen, buf)
+	term.PutInt32Ordered(termOffset+FrameLengthOffset, DataFrameHeaderLen+int32(len(buf)))
+
+	return status
+}
+
+// TryClaim reserves length bytes of frame payload space in the log buffer
+// and returns a BufferClaim wrapping that region directly (no allocation, no
+// intermediate copy) for the caller to write message content into. The
+// caller must call Commit or Abort on the claim exactly once - an
+// uncommitted, unaborted claim is never visible to subscribers and stalls
+// the stream, since consumers can't skip past it.
+//
+// Returns the claim and the resulting stream position on success (mirroring
+// Offer's positive/negative convention), or the zero BufferClaim and a
+// negative status (NotConnected, BackPressured, AdminAction, Closed,
+// MaxPositionExceeded) on failure.
+func (p *Publication) TryClaim(length int) (BufferClaim, int64) {
+	term, termOffset, status := p.claim(int32(length))
+	if status <= 0 {
+		return BufferClaim{}, status
+	}
+	return BufferClaim{term: term, offset: termOffset, length: int32(length)}, status
+}
+
+// claim reserves alignedLen(DataFrameHeaderLen+length) bytes in the current
+// term and writes every frame header field except the length field itself
+// (the ordered store that publishes the frame to consumers - left to the
+// caller, since it must happen only after the payload is written). Shared by
+// Offer and TryClaim so both use identical position-limit and
+// end-of-log-rotation handling.
+//
+// On success returns the claimed term buffer, the claimed offset within it,
+// and the resulting stream position (> 0). On failure returns a negative
+// status matching Offer's error convention.
+func (p *Publication) claim(length int32) (*AtomicBuffer, int32, int64) {
 	if p.closed.Load() || p.logBuffers == nil {
-		return Closed
+		return nil, 0, Closed
 	}
 	if p.conductor != nil && p.conductor.isTerminated() {
-		return Closed
+		return nil, 0, Closed
 	}
 	if !p.logBuffers.IsConnected() {
-		return NotConnected
+		return nil, 0, NotConnected
 	}
 
 	limit := p.positionLimit()
@@ -80,15 +121,15 @@ func (p *Publication) Offer(buf []byte) int64 {
 	termOffset := rawTailTermOffset(rawTail, termLen)
 
 	if termCount != termID-p.initialTermID {
-		return AdminAction // Rotation in progress by another thread; retry.
+		return nil, 0, AdminAction // Rotation in progress by another thread; retry.
 	}
 
-	frameLen := int32(DataFrameHeaderLen + len(buf))
+	frameLen := DataFrameHeaderLen + length
 	alignedLen := align(frameLen, DataFrameHeaderLen)
 
 	position := computePosition(termID, termOffset, termLen, p.initialTermID)
 	if position >= limit {
-		return p.backPressureStatus(position, alignedLen, termLen)
+		return nil, 0, p.backPressureStatus(position, alignedLen, termLen)
 	}
 
 	// Claim space: atomically add to the tail, then work with the claimed
@@ -100,7 +141,7 @@ func (p *Publication) Offer(buf []byte) int64 {
 	resultingOffset := termOffset + alignedLen
 	resultingPosition := computePosition(termID, resultingOffset, termLen, p.initialTermID)
 	if resultingOffset > termLen {
-		return p.handleEndOfLog(term, termLen, termID, termOffset, resultingPosition)
+		return nil, 0, p.handleEndOfLog(term, termLen, termID, termOffset, resultingPosition)
 	}
 
 	term.PutInt32(termOffset+FrameLengthOffset, 0)
@@ -111,10 +152,41 @@ func (p *Publication) Offer(buf []byte) int64 {
 	term.PutInt32(termOffset+FrameSessionIDOff, p.sessionID)
 	term.PutInt32(termOffset+FrameStreamIDOff, p.streamID)
 	term.PutInt32(termOffset+FrameTermIDOff, termID)
-	term.PutBytes(termOffset+DataFrameHeaderLen, buf)
-	term.PutInt32Ordered(termOffset+FrameLengthOffset, frameLen)
 
-	return resultingPosition
+	return term, termOffset, resultingPosition
+}
+
+// BufferClaim is a claimed, not-yet-published region of a log buffer term,
+// obtained via Publication.TryClaim. Write message content into Buffer()
+// directly - it aliases the term buffer's own memory, so there is no
+// allocation or copy - then call Commit or Abort exactly once.
+type BufferClaim struct {
+	term   *AtomicBuffer
+	offset int32 // start of the frame header; data starts at offset+DataFrameHeaderLen
+	length int32 // length of the claimed data region, excluding the frame header
+}
+
+// Buffer returns the claimed data region for the caller to write message
+// content into directly. The returned slice aliases the term buffer's
+// memory and is exactly the length passed to TryClaim; it must not be used
+// after Commit or Abort is called.
+func (c BufferClaim) Buffer() []byte {
+	return c.term.Slice(c.offset+DataFrameHeaderLen, c.length)
+}
+
+// Commit publishes the claimed frame, making it visible to subscribers.
+// Must be called exactly once per claim, after the caller has finished
+// writing into Buffer().
+func (c BufferClaim) Commit() {
+	c.term.PutInt32Ordered(c.offset+FrameLengthOffset, DataFrameHeaderLen+c.length)
+}
+
+// Abort marks the claimed region as padding instead of publishing it, so
+// subscribers skip over it. Use when the caller decides not to publish
+// after already claiming space (e.g. an error building the message).
+func (c BufferClaim) Abort() {
+	c.term.PutInt32(c.offset+FrameTypeOffset, FrameTypePadding)
+	c.term.PutInt32Ordered(c.offset+FrameLengthOffset, DataFrameHeaderLen+c.length)
 }
 
 // maxPossiblePosition is the maximum position a stream can reach given its

@@ -390,6 +390,159 @@ func TestPoll_FollowsPublisherAcrossTermBoundary(t *testing.T) {
 	}
 }
 
+func TestTryClaim_WriteDirectlyThenCommit(t *testing.T) {
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+
+	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	if pos <= 0 {
+		t.Fatalf("TryClaim: got status %d, want > 0", pos)
+	}
+	if pos != int64(offerTestAlignedLen) {
+		t.Fatalf("TryClaim position: got %d, want %d", pos, offerTestAlignedLen)
+	}
+
+	buf := claim.Buffer()
+	if len(buf) != offerTestPayloadLen {
+		t.Fatalf("claim buffer length: got %d, want %d", len(buf), offerTestPayloadLen)
+	}
+	for i := range buf {
+		buf[i] = byte(i)
+	}
+
+	// Before Commit, the frame length is still 0 (uncommitted) so a
+	// subscriber must not observe it.
+	term := lb.Term(0)
+	if got := term.GetInt32Volatile(FrameLengthOffset); got != 0 {
+		t.Fatalf("frame length before commit: got %d, want 0", got)
+	}
+
+	claim.Commit()
+
+	frameLen, frameType, termOffset, termID := frameAt(term, 0)
+	if frameType != FrameTypeData {
+		t.Errorf("frame type: got %#x, want %#x", frameType, FrameTypeData)
+	}
+	if frameLen != DataFrameHeaderLen+offerTestPayloadLen {
+		t.Errorf("frame length: got %d, want %d", frameLen, DataFrameHeaderLen+offerTestPayloadLen)
+	}
+	if termOffset != 0 {
+		t.Errorf("frame termOffset: got %d, want 0", termOffset)
+	}
+	if termID != 0 {
+		t.Errorf("frame termID: got %d, want 0", termID)
+	}
+
+	// The payload itself must be visible directly in the term buffer -
+	// exactly what claim.Buffer() aliased, with no separate copy.
+	got := make([]byte, offerTestPayloadLen)
+	term.GetBytes(DataFrameHeaderLen, got)
+	for i := range got {
+		if got[i] != byte(i) {
+			t.Fatalf("payload byte %d: got %d, want %d", i, got[i], byte(i))
+		}
+	}
+
+	// A subsequent claim must start immediately after the aligned frame.
+	claim2, pos2 := pub.TryClaim(offerTestPayloadLen)
+	if pos2 != int64(2*offerTestAlignedLen) {
+		t.Fatalf("second claim position: got %d, want %d", pos2, 2*offerTestAlignedLen)
+	}
+	claim2.Commit()
+}
+
+func TestTryClaim_BufferAliasesTermBuffer(t *testing.T) {
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+
+	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	if pos <= 0 {
+		t.Fatalf("TryClaim: got status %d, want > 0", pos)
+	}
+	buf := claim.Buffer()
+	buf[0] = 0x42
+
+	term := lb.Term(0)
+	if got := term.GetUint8(DataFrameHeaderLen); got != 0x42 {
+		t.Fatalf("write through claim.Buffer() not visible in term: got %#x, want 0x42", got)
+	}
+}
+
+func TestTryClaim_Abort(t *testing.T) {
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+
+	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	if pos <= 0 {
+		t.Fatalf("TryClaim: got status %d, want > 0", pos)
+	}
+	claim.Abort()
+
+	term := lb.Term(0)
+	frameLen, frameType, _, _ := frameAt(term, 0)
+	if frameType != FrameTypePadding {
+		t.Errorf("frame type after abort: got %#x, want %#x", frameType, FrameTypePadding)
+	}
+	if frameLen != DataFrameHeaderLen+offerTestPayloadLen {
+		t.Errorf("frame length after abort: got %d, want %d", frameLen, DataFrameHeaderLen+offerTestPayloadLen)
+	}
+
+	// A subscriber must be able to skip over the aborted frame and see the
+	// next committed one.
+	sub := newInMemSubscription(lb, 1001)
+	claim2, pos2 := pub.TryClaim(offerTestPayloadLen)
+	if pos2 <= 0 {
+		t.Fatalf("second TryClaim: got status %d, want > 0", pos2)
+	}
+	claim2.Buffer()[0] = 9
+	claim2.Commit()
+
+	var got []byte
+	sub.Poll(func(buf []byte, h *Header) {
+		got = append(got, buf[0])
+	}, 100)
+	if len(got) != 1 || got[0] != 9 {
+		t.Fatalf("poll after abort: got %v, want [9]", got)
+	}
+}
+
+func TestTryClaim_RotatesAtEndOfTerm(t *testing.T) {
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+
+	for i := 0; i < offerTestFramesPerTerm; i++ {
+		claim, pos := pub.TryClaim(offerTestPayloadLen)
+		if pos <= 0 {
+			t.Fatalf("claim %d: got status %d, want > 0", i, pos)
+		}
+		claim.Commit()
+	}
+
+	if _, status := pub.TryClaim(offerTestPayloadLen); status != AdminAction {
+		t.Fatalf("claim at end of term: got %d, want AdminAction", status)
+	}
+	if got := lb.ActiveTermCount(); got != 1 {
+		t.Fatalf("activeTermCount: got %d, want 1", got)
+	}
+
+	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	wantPos := int64(offerTestTermLen) + int64(offerTestAlignedLen)
+	if pos != wantPos {
+		t.Fatalf("claim after rotation: got position %d, want %d", pos, wantPos)
+	}
+	claim.Commit()
+}
+
+func TestTryClaim_BackPressuredAtPositionLimit(t *testing.T) {
+	lb := newInMemLogBuffers(offerTestTermLen)
+	pub := newInMemPublication(lb, 7, 1001)
+
+	setInMemPosLimit(pub, 0)
+	if _, status := pub.TryClaim(offerTestPayloadLen); status != BackPressured {
+		t.Fatalf("claim with limit 0: got %d, want BackPressured", status)
+	}
+}
+
 type errOffer int64
 
 func (e errOffer) Error() string {
