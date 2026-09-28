@@ -53,6 +53,13 @@ type LogBuffers struct {
 	termLen int32
 	terms   [PartitionCount]*AtomicBuffer
 	meta    *AtomicBuffer
+
+	// heapData holds a hard reference to a heap-allocated backing array for
+	// loopback (non-mmap'd) instances built via NewLoopbackLogBuffers, so the
+	// GC can't collect it out from under the AtomicBuffers in terms/meta
+	// (which reach it only via unsafe.Pointer). data is left nil for these
+	// instances so Close remains a no-op instead of munmap'ing heap memory.
+	heapData []byte //nolint:unused // referenced only for GC liveness, never read
 }
 
 // MapLogBuffers opens and memory-maps a log buffer file.
