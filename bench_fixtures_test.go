@@ -45,9 +45,43 @@ var keepAlive = map[*LogBuffers][]byte{}
 
 // resetTermTail zeroes the tail counter for partition 0 so the term can be
 // re-filled in a benchmark loop without rotating partitions.
+//
+// Only safe when the benchmark never lets Publication.Offer/TryClaim
+// actually rotate partitions (i.e. ActiveTermCount stays 0 for the whole
+// benchmark, e.g. by resetting ahead of the term filling up rather than
+// after a negative return). If a benchmark exercises real rotation across
+// all three partitions - which Offer/TryClaim can trigger via
+// AdminAction/handleEndOfLog - use resetLogBufferToGenesis instead:
+// resetting only partition 0's tail while ActiveTermCount has moved on
+// desyncs the two, and once ActiveTermCount wraps back around to reuse
+// partition 0, ConcurrentPublication.claim's admin-action check
+// (termCount != termID-initialTermID) never passes again, livelocking the
+// benchmark in a permanent AdminAction retry loop.
 func resetTermTail(lb *LogBuffers, partIndex int) {
 	off := int32(MetaTermTailCounterOff + partIndex*8)
 	lb.meta.PutInt64Ordered(off, 0)
+}
+
+// resetLogBufferToGenesis rewinds every partition's tail counter and
+// ActiveTermCount back to the same bootstrap state newInMemLogBuffers
+// establishes, then zeroes all three terms. Unlike resetTermTail (which
+// only touches one partition and is unsafe once real rotation has moved
+// ActiveTermCount past it - see resetTermTail's doc comment), this keeps
+// the tail counters and ActiveTermCount mutually consistent regardless of
+// how many rotations happened before the reset, so it's safe to call from
+// any benchmark that actually rotates through all three partitions via
+// Publication.Offer/TryClaim.
+func resetLogBufferToGenesis(lb *LogBuffers, termLen int32) {
+	const initialTermID = int32(0)
+	for i := 1; i < PartitionCount; i++ {
+		expectedTermID := initialTermID + int32(i) - PartitionCount
+		lb.meta.PutInt64Ordered(int32(MetaTermTailCounterOff+i*8), packTail(expectedTermID, 0))
+	}
+	lb.meta.PutInt64Ordered(MetaTermTailCounterOff, packTail(initialTermID, 0))
+	lb.meta.PutInt32Ordered(MetaActiveTermCountOff, 0)
+	for i := 0; i < PartitionCount; i++ {
+		zeroTerm(lb, i, termLen)
+	}
 }
 
 // zeroTerm zeroes out the first n bytes of a partition term so stale frame
