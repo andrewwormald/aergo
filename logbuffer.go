@@ -271,6 +271,13 @@ func ReadTerm(
 	offset := termOffset
 	capacity := term.Capacity()
 
+	// Declared outside the loop and reused. Its address is passed to the
+	// handler, so it escapes whatever we do - but escaping once per call
+	// rather than once per fragment is the difference between no garbage
+	// and garbage proportional to throughput. The handler may only use
+	// it for the duration of the call, which is Aeron's contract.
+	var hdr DataFrameHeader
+
 	for fragmentsRead < fragmentLimit && offset < capacity {
 		frameLen := term.GetInt32Volatile(offset + FrameLengthOffset)
 		if frameLen <= 0 {
@@ -281,7 +288,7 @@ func ReadTerm(
 		frameType := int16(term.GetInt32(offset + FrameTypeOffset))
 
 		if frameType != int16(FrameTypePadding) {
-			hdr := DataFrameHeader{
+			hdr = DataFrameHeader{
 				FrameLength:   frameLen,
 				Version:       term.GetUint8(offset + FrameVersionOffset),
 				Flags:         term.GetUint8(offset + FrameFlagsOffset),
