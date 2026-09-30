@@ -1,7 +1,11 @@
 package aergo
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -130,4 +134,52 @@ func TestPool_ZeroAllocSteadyState(t *testing.T) {
 	if n != 0 {
 		t.Logf("allocs/op = %v (non-zero is expected under -race)", n)
 	}
+}
+
+// TestPool_VetRejectsCopy pins the copy guard. A copied Pool would give
+// two pools one backing array, and they would hand the same value to
+// two callers - so vet has to reject it. Runs the analyser against a
+// throwaway file rather than asserting on the field's presence, which
+// would pass even if the analyser stopped recognising it.
+func TestPool_VetRejectsCopy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("invokes go vet")
+	}
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	write("go.mod", "module vetcheck\n\ngo 1.26\n\nrequire github.com/andrewwormald/aergo v0.0.0\n\nreplace github.com/andrewwormald/aergo => "+repoRoot(t)+"\n")
+	write("main.go", `package main
+
+import "github.com/andrewwormald/aergo"
+
+func main() {
+	p := aergo.NewPool(4, func() int { return 1 }, nil)
+	q := *p
+	_ = q
+}
+`)
+	cmd := exec.Command("go", "vet", "./...")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("go vet accepted a Pool copy; the noCopy guard is not working.\n%s", out)
+	}
+	if !strings.Contains(string(out), "copies lock value") {
+		t.Errorf("vet failed for some other reason:\n%s", out)
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
 }

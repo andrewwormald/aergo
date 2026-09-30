@@ -25,6 +25,12 @@ package aergo
 // Values are reused last-in-first-out, since the most recently released
 // value is the most likely to still be in cache.
 type Pool[T any] struct {
+	// Copying a Pool would give two pools one backing array, and they
+	// would hand the same value to two callers. go vet's copylocks
+	// analyser reports that because of this field; it has no runtime
+	// cost and no behaviour of its own.
+	noCopy noCopy
+
 	free  []T
 	new   func() T
 	reset func(T)
@@ -97,3 +103,16 @@ func (p *Pool[T]) Len() int { return len(p.free) }
 
 // Cap reports the pool's fixed capacity.
 func (p *Pool[T]) Cap() int { return cap(p.free) }
+
+// noCopy is the standard library's marker for a type that must not be
+// copied. It is not a lock: the Lock and Unlock methods exist only so
+// go vet's copylocks analyser recognises it.
+//
+// It catches a copy, not concurrent use through a shared pointer -
+// nothing in the language expresses that. The race detector reports
+// that case instead, immediately, since Get and Put both mutate
+// without synchronisation.
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
