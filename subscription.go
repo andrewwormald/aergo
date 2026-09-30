@@ -95,7 +95,14 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 			// itself has and what every consumer here already assumes -
 			// they decode or copy before returning.
 			if cap(s.payloadScratch) < int(length) {
-				s.payloadScratch = make([]byte, length)
+				// Grow with slack rather than to the exact size, so a
+				// stream of increasing payloads settles instead of
+				// reallocating on each new high-water mark.
+				grown := 2 * cap(s.payloadScratch)
+				if grown < int(length) {
+					grown = int(length)
+				}
+				s.payloadScratch = make([]byte, grown)
 			}
 			payload := s.payloadScratch[:length]
 			buf.GetBytes(offset, payload)
