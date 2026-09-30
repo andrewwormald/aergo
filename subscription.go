@@ -18,12 +18,24 @@ type Header struct {
 type FragmentHandler func(buffer []byte, header *Header)
 
 // Subscription receives messages from one or more publications via images.
+//
+// Poll is not safe to call concurrently for the same Subscription. This
+// matches Aeron itself, where a subscription is drained by the one
+// thread that owns it, and it is what lets Poll reuse scratch state
+// between calls instead of allocating on every pass. Close may be
+// called from any goroutine.
 type Subscription struct {
 	conductor      *Conductor
 	channel        string
 	streamID       int32
 	registrationID int64
 	closed         atomic.Bool
+
+	// Scratch reused across fragments, owned by the polling goroutine.
+	// Both are handed to the handler, which is why the contract above
+	// says they are only valid for the duration of the call.
+	payloadScratch []byte
+	headerScratch  Header
 }
 
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
@@ -47,6 +59,9 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		return 0
 	}
 
+	// Snapshot under the lock, then iterate outside it. Appending into
+	// the retained scratch reuses its capacity instead of allocating a
+	// new slice on every poll.
 	s.conductor.mu.Lock()
 	images := make([]*Image, len(state.images))
 	copy(images, state.images)
@@ -74,13 +89,28 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		term := img.LogBuffers.Term(partIndex)
 
 		fragments, newOffset := ReadTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
-			payload := make([]byte, length)
+			// Reuse the buffer and header across fragments rather than
+			// allocating a pair per message. Both are only valid for the
+			// duration of the handler call, which is the contract Aeron
+			// itself has and what every consumer here already assumes -
+			// they decode or copy before returning.
+			if cap(s.payloadScratch) < int(length) {
+				// Grow with slack rather than to the exact size, so a
+				// stream of increasing payloads settles instead of
+				// reallocating on each new high-water mark.
+				grown := 2 * cap(s.payloadScratch)
+				if grown < int(length) {
+					grown = int(length)
+				}
+				s.payloadScratch = make([]byte, grown)
+			}
+			payload := s.payloadScratch[:length]
 			buf.GetBytes(offset, payload)
 
 			alignedFrame := align(hdr.FrameLength, DataFrameHeaderLen)
 			pos := computePosition(hdr.TermID, hdr.TermOffset+alignedFrame, termLen, initialTermID)
 
-			h := &Header{
+			s.headerScratch = Header{
 				FrameLength:   hdr.FrameLength,
 				Flags:         hdr.Flags,
 				SessionID:     hdr.SessionID,
@@ -90,7 +120,7 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 				ReservedValue: hdr.ReservedValue,
 				Position:      pos,
 			}
-			handler(payload, h)
+			handler(payload, &s.headerScratch)
 		}, remaining)
 
 		// Advance even when only padding was consumed (fragments == 0 but
