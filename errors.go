@@ -30,8 +30,8 @@ const (
 	MaxPositionExceeded int64 = -5
 )
 
-// OfferResultName returns the name the Java client gives an offer result,
-// for logs and errors: "BACK_PRESSURED" for BackPressured, and so on.
+// OfferResultName returns the name of an offer result, for logs and errors:
+// "BACK_PRESSURED" for BackPressured, and so on.
 func OfferResultName(result int64) string {
 	switch result {
 	case NotConnected:
@@ -57,8 +57,8 @@ func OfferRetryable(result int64) bool {
 }
 
 // OfferGone reports whether an offer result means the publication can no
-// longer be used as it is: NotConnected, Closed or MaxPositionExceeded. These
-// are the results the Java cluster client treats as a disconnect.
+// longer be used as it is: NotConnected, Closed or MaxPositionExceeded. A
+// caller that sees one should treat the connection as lost and reconnect.
 func OfferGone(result int64) bool {
 	return result == NotConnected || result == Closed || result == MaxPositionExceeded
 }
