@@ -30,6 +30,39 @@ const (
 	MaxPositionExceeded int64 = -5
 )
 
+// OfferResultName returns the name the Java client gives an offer result,
+// for logs and errors: "BACK_PRESSURED" for BackPressured, and so on.
+func OfferResultName(result int64) string {
+	switch result {
+	case NotConnected:
+		return "NOT_CONNECTED"
+	case BackPressured:
+		return "BACK_PRESSURED"
+	case AdminAction:
+		return "ADMIN_ACTION"
+	case Closed:
+		return "CLOSED"
+	case MaxPositionExceeded:
+		return "MAX_POSITION_EXCEEDED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// OfferRetryable reports whether an offer result is transient: the
+// publication is busy, not gone, so the same offer may succeed shortly.
+// True for BackPressured and AdminAction.
+func OfferRetryable(result int64) bool {
+	return result == BackPressured || result == AdminAction
+}
+
+// OfferGone reports whether an offer result means the publication can no
+// longer be used as it is: NotConnected, Closed or MaxPositionExceeded. These
+// are the results the Java cluster client treats as a disconnect.
+func OfferGone(result int64) bool {
+	return result == NotConnected || result == Closed || result == MaxPositionExceeded
+}
+
 // driverErrorCodeNames maps media driver error codes to their names,
 // mirroring io.aeron.ErrorCode.
 var driverErrorCodeNames = map[int32]string{
