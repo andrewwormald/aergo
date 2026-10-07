@@ -1,8 +1,10 @@
 package aergo
 
 import (
+	"context"
 	"math"
 	"sync/atomic"
+	"time"
 )
 
 // Publication wraps a log buffer for sending messages to a stream.
@@ -257,6 +259,26 @@ func (p *Publication) OfferWithRetry(buf []byte, maxRetries int) int64 {
 		}
 	}
 	return BackPressured
+}
+
+// OfferWithBackoff offers buf, retrying while the result is OfferRetryable
+// until timeout elapses or ctx ends, and returns the last result.
+//
+// OfferWithRetry spins without pausing, which is too short to ride out the
+// gap after a publication first connects: the log reports connected when the
+// driver's sender gets the first status message, but the driver raises the
+// publication limit on a later duty cycle. An offer in that gap sees position
+// 0 against limit 0 and returns BackPressured even though nothing is wrong.
+// This sleeps a millisecond between attempts instead.
+func (p *Publication) OfferWithBackoff(ctx context.Context, buf []byte, timeout time.Duration) int64 {
+	deadline := time.Now().Add(timeout)
+	for {
+		result := p.Offer(buf)
+		if !OfferRetryable(result) || !time.Now().Before(deadline) || ctx.Err() != nil {
+			return result
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // IsConnected returns whether the publication has active subscribers.

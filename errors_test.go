@@ -52,3 +52,47 @@ func TestOfferReturnCodeValues(t *testing.T) {
 		}
 	}
 }
+
+func TestOfferResultName(t *testing.T) {
+	tests := []struct {
+		result int64
+		want   string
+	}{
+		{NotConnected, "NOT_CONNECTED"},
+		{BackPressured, "BACK_PRESSURED"},
+		{AdminAction, "ADMIN_ACTION"},
+		{Closed, "CLOSED"},
+		{MaxPositionExceeded, "MAX_POSITION_EXCEEDED"},
+		{0, "UNKNOWN"},
+		{128, "UNKNOWN"},
+	}
+	for _, tc := range tests {
+		if got := OfferResultName(tc.result); got != tc.want {
+			t.Errorf("OfferResultName(%d): got %q, want %q", tc.result, got, tc.want)
+		}
+	}
+}
+
+func TestOfferResultClassification(t *testing.T) {
+	tests := []struct {
+		result    int64
+		retryable bool
+		gone      bool
+	}{
+		{NotConnected, false, true},
+		{BackPressured, true, false},
+		{AdminAction, true, false},
+		{Closed, false, true},
+		{MaxPositionExceeded, false, true},
+		{0, false, false},
+		{64, false, false},
+	}
+	for _, tc := range tests {
+		if got := OfferRetryable(tc.result); got != tc.retryable {
+			t.Errorf("OfferRetryable(%d): got %v, want %v", tc.result, got, tc.retryable)
+		}
+		if got := OfferGone(tc.result); got != tc.gone {
+			t.Errorf("OfferGone(%d): got %v, want %v", tc.result, got, tc.gone)
+		}
+	}
+}
