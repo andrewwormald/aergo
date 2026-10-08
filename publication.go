@@ -295,7 +295,10 @@ func (p *Publication) SessionID() int32 { return p.sessionID }
 // Close releases the publication.
 func (p *Publication) Close() {
 	if p.closed.CompareAndSwap(false, true) {
-		p.conductor.proxy.RemovePublication(p.registrationID)
+		// A loopback publication has no driver to tell.
+		if p.conductor != nil && p.conductor.proxy != nil {
+			p.conductor.proxy.RemovePublication(p.registrationID)
+		}
 	}
 }
 

@@ -55,3 +55,17 @@ func TestLoopback_TryClaimThenPoll(t *testing.T) {
 		}
 	}
 }
+
+// A loopback stream has no driver, so closing it must be a quiet no-op.
+func TestLoopbackStreamsCloseWithoutADriver(t *testing.T) {
+	lb := NewLoopbackLogBuffers(64 * 1024)
+	pub := NewLoopbackPublication(lb, 1, 1)
+	sub := NewLoopbackSubscription(lb, 1)
+	pub.Close()
+	sub.Close()
+	pub.Close()
+	sub.Close()
+	if r := pub.Offer([]byte("x")); r != Closed {
+		t.Errorf("Offer after Close = %d, want Closed", r)
+	}
+}

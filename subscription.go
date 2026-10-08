@@ -143,6 +143,9 @@ func (s *Subscription) StreamID() int32 { return s.streamID }
 // Close releases the subscription.
 func (s *Subscription) Close() {
 	if s.closed.CompareAndSwap(false, true) {
-		s.conductor.proxy.RemoveSubscription(s.registrationID)
+		// A loopback subscription has no driver to tell.
+		if s.conductor != nil && s.conductor.proxy != nil {
+			s.conductor.proxy.RemoveSubscription(s.registrationID)
+		}
 	}
 }
