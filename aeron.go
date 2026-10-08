@@ -184,6 +184,13 @@ func (c *Aeron) tryFindHeartbeatCounter() {
 	}
 }
 
+// NextCorrelationId returns an id that is unique across this client and the
+// driver, for correlating a request with its response. It mirrors Java's
+// Aeron.nextCorrelationId().
+func (c *Aeron) NextCorrelationId() int64 {
+	return c.conductor.proxy.NextCorrelationID()
+}
+
 // DoWork processes driver responses. Call this periodically.
 func (c *Aeron) DoWork() int {
 	return c.conductor.DoWork()

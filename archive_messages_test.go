@@ -11,6 +11,7 @@ import (
 // (schema 101, version 13), so the codecs are checked against the real wire
 // format and not only against themselves.
 var archiveVectors = map[string]string{
+	"AuthConnectRequest":          "10003a0065000d00887766554433221114000000000c01001e0000006165726f6e3a7564703f656e64706f696e743d6c6f63616c686f73743a3003000000050607",
 	"ConnectRequest":              "1000020065000d00887766554433221114000000000c01001e0000006165726f6e3a7564703f656e64706f696e743d6c6f63616c686f73743a30",
 	"CloseSessionRequest":         "0800030065000d000807060504030201",
 	"ChallengeResponse":           "10003c0065000d000b0000000000000016000000000000000400000001020304",
@@ -52,6 +53,9 @@ func checkEncode(t *testing.T, name string, encodedLength int, fn func(buf []byt
 func TestArchiveRequestsMatchJavaEncoders(t *testing.T) {
 	c := &ArchiveConnectRequest{CorrelationId: 0x1122334455667788, ResponseStreamId: 20, Version: ArchiveProtocolSemanticVersion, ResponseChannel: "aeron:udp?endpoint=localhost:0"}
 	checkEncode(t, "ConnectRequest", c.EncodedLength(), func(b []byte) int { return c.Encode(b, 0) })
+
+	ac := &ArchiveAuthConnectRequest{CorrelationId: 0x1122334455667788, ResponseStreamId: 20, Version: ArchiveProtocolSemanticVersion, ResponseChannel: "aeron:udp?endpoint=localhost:0", EncodedCredentials: []byte{5, 6, 7}}
+	checkEncode(t, "AuthConnectRequest", ac.EncodedLength(), func(b []byte) int { return ac.Encode(b, 0) })
 
 	cs := &ArchiveCloseSessionRequest{ControlSessionId: 0x0102030405060708}
 	checkEncode(t, "CloseSessionRequest", cs.EncodedLength(), func(b []byte) int { return cs.Encode(b, 0) })
