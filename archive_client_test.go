@@ -117,6 +117,11 @@ type fakeArchiveAeron struct {
 
 	requestChannel, responseChannel string
 	requestStream, responseStream   int32
+
+	// Set by addReplaySubscription.
+	replayChannel string
+	replayStream  int32
+	replayErr     error
 }
 
 func newFakeArchiveAeron() *fakeArchiveAeron {
@@ -131,6 +136,14 @@ func (f *fakeArchiveAeron) addRequestPublication(channel string, streamID int32)
 func (f *fakeArchiveAeron) addResponseSubscription(channel string, streamID int32) (archiveSubscription, error) {
 	f.responseChannel, f.responseStream = channel, streamID
 	return f.sub, nil
+}
+
+func (f *fakeArchiveAeron) addReplaySubscription(channel string, streamID int32) (*Subscription, error) {
+	f.replayChannel, f.replayStream = channel, streamID
+	if f.replayErr != nil {
+		return nil, f.replayErr
+	}
+	return NewLoopbackSubscription(NewLoopbackLogBuffers(64*1024), streamID), nil
 }
 
 func (f *fakeArchiveAeron) NextCorrelationId() int64 { f.nextId++; return f.nextId }

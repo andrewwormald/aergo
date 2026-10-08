@@ -126,6 +126,7 @@ type archiveSubscription interface {
 type archiveEndpoints interface {
 	addRequestPublication(channel string, streamID int32) (archivePublication, error)
 	addResponseSubscription(channel string, streamID int32) (archiveSubscription, error)
+	addReplaySubscription(channel string, streamID int32) (*Subscription, error)
 	NextCorrelationId() int64
 	DoWork() int
 }
@@ -135,6 +136,10 @@ type realArchiveAeron struct{ *Aeron }
 
 func (r realArchiveAeron) addRequestPublication(channel string, streamID int32) (archivePublication, error) {
 	return r.Aeron.AddPublication(channel, streamID)
+}
+
+func (r realArchiveAeron) addReplaySubscription(channel string, streamID int32) (*Subscription, error) {
+	return r.Aeron.AddSubscription(channel, streamID)
 }
 
 func (r realArchiveAeron) addResponseSubscription(channel string, streamID int32) (archiveSubscription, error) {
