@@ -39,19 +39,21 @@ const (
 
 // Archive control protocol template ids.
 const (
-	TemplateIdArchiveControlResponse             = 1
-	TemplateIdArchiveConnectRequest              = 2
-	TemplateIdArchiveCloseSessionRequest         = 3
-	TemplateIdArchiveReplayRequest               = 6
-	TemplateIdArchiveStopReplayRequest           = 7
-	TemplateIdArchiveListRecordingsForUriRequest = 9
-	TemplateIdArchiveRecordingPositionRequest    = 12
-	TemplateIdArchiveStopAllReplaysRequest       = 19
-	TemplateIdArchiveRecordingDescriptor         = 22
-	TemplateIdArchiveRecordingSignalEvent        = 24
-	TemplateIdArchiveChallenge                   = 59
-	TemplateIdArchiveChallengeResponse           = 60
-	TemplateIdArchiveMaxRecordedPositionRequest  = 67
+	TemplateIdArchiveControlResponse                  = 1
+	TemplateIdArchiveConnectRequest                   = 2
+	TemplateIdArchiveCloseSessionRequest              = 3
+	TemplateIdArchiveReplayRequest                    = 6
+	TemplateIdArchiveStopReplayRequest                = 7
+	TemplateIdArchiveListRecordingsForUriRequest      = 9
+	TemplateIdArchiveRecordingPositionRequest         = 12
+	TemplateIdArchiveFindLastMatchingRecordingRequest = 16
+	TemplateIdArchiveStopAllReplaysRequest            = 19
+	TemplateIdArchiveRecordingDescriptor              = 22
+	TemplateIdArchiveRecordingSignalEvent             = 24
+	TemplateIdArchiveAuthConnectRequest               = 58
+	TemplateIdArchiveChallenge                        = 59
+	TemplateIdArchiveChallengeResponse                = 60
+	TemplateIdArchiveMaxRecordedPositionRequest       = 67
 )
 
 // ArchiveNullValue is the SBE null for int64 fields such as a replay length
@@ -180,6 +182,39 @@ func (m *ArchiveConnectRequest) Encode(buf []byte, offset int) int {
 }
 
 // ---------------------------------------------------------------------------
+// ArchiveAuthConnectRequest (Template 58)
+//
+// Fixed fields (16 bytes) as ArchiveConnectRequest; then ResponseChannel (var
+// string) and EncodedCredentials (var bytes).
+// ---------------------------------------------------------------------------
+
+// ArchiveAuthConnectRequest opens a control session and carries credentials,
+// for an archive that has authentication enabled.
+type ArchiveAuthConnectRequest struct {
+	CorrelationId      int64
+	ResponseStreamId   int32
+	Version            int32
+	ResponseChannel    string
+	EncodedCredentials []byte
+}
+
+func (m *ArchiveAuthConnectRequest) EncodedLength() int {
+	return HeaderSize + archiveConnectRequestBlockLength + 4 + len(m.ResponseChannel) + 4 + len(m.EncodedCredentials)
+}
+
+func (m *ArchiveAuthConnectRequest) Encode(buf []byte, offset int) int {
+	n := archiveHeader(buf, offset, archiveConnectRequestBlockLength, TemplateIdArchiveAuthConnectRequest)
+	base := offset + n
+	putInt64(buf, base+0, m.CorrelationId)
+	putInt32(buf, base+8, m.ResponseStreamId)
+	putInt32(buf, base+12, m.Version)
+	varOffset := base + archiveConnectRequestBlockLength
+	varN := putVarString(buf, varOffset, m.ResponseChannel)
+	varN += putVarBytes(buf, varOffset+varN, m.EncodedCredentials)
+	return n + archiveConnectRequestBlockLength + varN
+}
+
+// ---------------------------------------------------------------------------
 // ArchiveCloseSessionRequest (Template 3)
 //
 // Fixed fields (8 bytes): ControlSessionId int64 @0.
@@ -268,6 +303,45 @@ func (m *ArchiveListRecordingsForUriRequest) Encode(buf []byte, offset int) int 
 	putInt32(buf, base+28, m.StreamId)
 	varN := putVarString(buf, base+archiveListRecordingsForUriRequestBlockLength, m.Channel)
 	return n + archiveListRecordingsForUriRequestBlockLength + varN
+}
+
+// ---------------------------------------------------------------------------
+// ArchiveFindLastMatchingRecordingRequest (Template 16)
+//
+// Fixed fields (32 bytes): ControlSessionId int64 @0, CorrelationId int64 @8,
+// MinRecordingId int64 @16, SessionId int32 @24, StreamId int32 @28; then
+// Channel (var string), a substring the recording's channel must contain.
+// ---------------------------------------------------------------------------
+
+const archiveFindLastMatchingRecordingRequestBlockLength = 32
+
+// ArchiveFindLastMatchingRecordingRequest finds the most recent recording at
+// or after MinRecordingId whose channel contains Channel and whose stream and
+// session ids match. The recording id comes back in
+// ArchiveControlResponse.RelevantId, or ArchiveNullValue when none matches.
+type ArchiveFindLastMatchingRecordingRequest struct {
+	ControlSessionId int64
+	CorrelationId    int64
+	MinRecordingId   int64
+	SessionId        int32
+	StreamId         int32
+	Channel          string
+}
+
+func (m *ArchiveFindLastMatchingRecordingRequest) EncodedLength() int {
+	return HeaderSize + archiveFindLastMatchingRecordingRequestBlockLength + 4 + len(m.Channel)
+}
+
+func (m *ArchiveFindLastMatchingRecordingRequest) Encode(buf []byte, offset int) int {
+	n := archiveHeader(buf, offset, archiveFindLastMatchingRecordingRequestBlockLength, TemplateIdArchiveFindLastMatchingRecordingRequest)
+	base := offset + n
+	putInt64(buf, base+0, m.ControlSessionId)
+	putInt64(buf, base+8, m.CorrelationId)
+	putInt64(buf, base+16, m.MinRecordingId)
+	putInt32(buf, base+24, m.SessionId)
+	putInt32(buf, base+28, m.StreamId)
+	varN := putVarString(buf, base+archiveFindLastMatchingRecordingRequestBlockLength, m.Channel)
+	return n + archiveFindLastMatchingRecordingRequestBlockLength + varN
 }
 
 // ---------------------------------------------------------------------------
