@@ -153,6 +153,10 @@ type Archive struct {
 	controlSessionId int64
 	closed           bool
 
+	// filterSession drops responses for other control sessions once ours is
+	// known. It is zero while connecting, when the session id is not yet known.
+	filterSession int64
+
 	// The most recent response the handler decoded, for awaitResponse.
 	pending archivePending
 }
@@ -162,6 +166,11 @@ type archivePending struct {
 	hasResponse  bool
 	challenge    ArchiveChallenge
 	hasChallenge bool
+
+	// collectDescriptors makes onFragment keep RecordingDescriptor messages
+	// for the awaited correlation id, for the list queries.
+	collectDescriptors bool
+	descriptors        []ArchiveRecordingDescriptor
 }
 
 // ConnectArchive opens a control session with the archive. It blocks until the
@@ -236,6 +245,7 @@ func (a *Archive) connect(ctx context.Context) error {
 		return err
 	}
 	a.controlSessionId = resp.ControlSessionId
+	a.filterSession = resp.ControlSessionId
 	return nil
 }
 
@@ -362,9 +372,20 @@ func (a *Archive) onFragment(buf []byte, correlationId int64, allowChallenge boo
 		if _, err := resp.Decode(buf, body, int(h.BlockLength)); err != nil {
 			return
 		}
-		if resp.CorrelationId == correlationId {
+		if resp.CorrelationId == correlationId && a.forThisSession(resp.ControlSessionId) {
 			a.pending.response = resp
 			a.pending.hasResponse = true
+		}
+	case TemplateIdArchiveRecordingDescriptor:
+		if !a.pending.collectDescriptors {
+			return
+		}
+		var rd ArchiveRecordingDescriptor
+		if _, err := rd.Decode(buf, body, int(h.BlockLength)); err != nil {
+			return
+		}
+		if rd.CorrelationId == correlationId && a.forThisSession(rd.ControlSessionId) {
+			a.pending.descriptors = append(a.pending.descriptors, rd)
 		}
 	case TemplateIdArchiveChallenge:
 		if !allowChallenge {
@@ -379,6 +400,12 @@ func (a *Archive) onFragment(buf []byte, correlationId int64, allowChallenge boo
 			a.pending.hasChallenge = true
 		}
 	}
+}
+
+// forThisSession reports whether a response's session id is ours, or whether we
+// do not know ours yet.
+func (a *Archive) forThisSession(controlSessionId int64) bool {
+	return a.filterSession == 0 || controlSessionId == a.filterSession
 }
 
 // ControlSessionId returns the id the archive assigned to this session.
