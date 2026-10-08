@@ -38,9 +38,12 @@ package aergo (repo root, single package)
     |   BroadcastReceiver, Conductor,
     |   Publication, Subscription
     |
-    `-- Cluster, AeronCluster, ClusterConfig -- Aeron cluster protocol built on
-        SBE codecs, EgressListener              the above (session connect,
-                                                 leader tracking, reconnection)
+    |-- Cluster, AeronCluster, ClusterConfig -- Aeron cluster protocol built on
+    |   SBE codecs, EgressListener              the above (session connect,
+    |                                            leader tracking, reconnection)
+    |
+    `-- Archive* messages (archive_messages.go) -- Aeron Archive control protocol
+        (schema 101): connect, list recordings, positions, replay start/stop
 ```
 
 ## Key conventions
