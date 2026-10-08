@@ -56,9 +56,21 @@ const (
 	TemplateIdArchiveMaxRecordedPositionRequest       = 67
 )
 
-// ArchiveNullValue is the SBE null for int64 fields such as a replay length
-// that means "to the end of the recording" or a position not yet known.
+// ArchiveNullValue is Aeron's NULL_VALUE: the "not set" marker the archive
+// protocol uses for positions, lengths, ids and replay options.
 const ArchiveNullValue int64 = -1
+
+// Replay sentinels, named as the Java client names them.
+const (
+	// ArchiveNullPosition as a replay position starts from the beginning of
+	// the recording (AeronArchive.NULL_POSITION).
+	ArchiveNullPosition int64 = ArchiveNullValue
+
+	// ArchiveReplayAllAndFollow as a replay length replays the whole recording
+	// and follows it while it is live (AeronArchive.REPLAY_ALL_AND_FOLLOW,
+	// also NULL_LENGTH).
+	ArchiveReplayAllAndFollow int64 = ArchiveNullValue
+)
 
 // ArchiveControlResponseCode is the result code in an ArchiveControlResponse.
 type ArchiveControlResponseCode int32
@@ -432,10 +444,12 @@ const archiveReplayRequestBlockLength = 56
 // the replayed data on ReplayChannel and ReplayStreamId, and answers with an
 // ArchiveControlResponse whose RelevantId is the replay session id.
 //
-// Position is the stream position to start from (it must be frame aligned).
-// Length is the number of bytes to replay; ArchiveNullValue replays to the end
-// of the recording and keeps following it while it is active. FileIoMaxLength
-// of ArchiveNullValue (as an int32, math.MinInt32) uses the archive default.
+// Position is the stream position to start from, frame aligned;
+// ArchiveNullValue starts from the beginning of the recording. Length is the
+// number of bytes to replay; ArchiveNullValue replays the whole recording and,
+// while it is still being recorded, keeps following it. FileIoMaxLength and
+// ReplayToken of ArchiveNullValue use the archive's defaults (the Java client
+// sends -1 for both unless they are set).
 type ArchiveReplayRequest struct {
 	ControlSessionId int64
 	CorrelationId    int64
