@@ -49,6 +49,7 @@ const (
 	TemplateIdArchiveStopAllReplaysRequest       = 19
 	TemplateIdArchiveRecordingDescriptor         = 22
 	TemplateIdArchiveRecordingSignalEvent        = 24
+	TemplateIdArchiveAuthConnectRequest          = 58
 	TemplateIdArchiveChallenge                   = 59
 	TemplateIdArchiveChallengeResponse           = 60
 	TemplateIdArchiveMaxRecordedPositionRequest  = 67
@@ -176,6 +177,39 @@ func (m *ArchiveConnectRequest) Encode(buf []byte, offset int) int {
 	putInt32(buf, base+8, m.ResponseStreamId)
 	putInt32(buf, base+12, m.Version)
 	varN := putVarString(buf, base+archiveConnectRequestBlockLength, m.ResponseChannel)
+	return n + archiveConnectRequestBlockLength + varN
+}
+
+// ---------------------------------------------------------------------------
+// ArchiveAuthConnectRequest (Template 58)
+//
+// Fixed fields (16 bytes) as ArchiveConnectRequest; then ResponseChannel (var
+// string) and EncodedCredentials (var bytes).
+// ---------------------------------------------------------------------------
+
+// ArchiveAuthConnectRequest opens a control session and carries credentials,
+// for an archive that has authentication enabled.
+type ArchiveAuthConnectRequest struct {
+	CorrelationId      int64
+	ResponseStreamId   int32
+	Version            int32
+	ResponseChannel    string
+	EncodedCredentials []byte
+}
+
+func (m *ArchiveAuthConnectRequest) EncodedLength() int {
+	return HeaderSize + archiveConnectRequestBlockLength + 4 + len(m.ResponseChannel) + 4 + len(m.EncodedCredentials)
+}
+
+func (m *ArchiveAuthConnectRequest) Encode(buf []byte, offset int) int {
+	n := archiveHeader(buf, offset, archiveConnectRequestBlockLength, TemplateIdArchiveAuthConnectRequest)
+	base := offset + n
+	putInt64(buf, base+0, m.CorrelationId)
+	putInt32(buf, base+8, m.ResponseStreamId)
+	putInt32(buf, base+12, m.Version)
+	varOffset := base + archiveConnectRequestBlockLength
+	varN := putVarString(buf, varOffset, m.ResponseChannel)
+	varN += putVarBytes(buf, varOffset+varN, m.EncodedCredentials)
 	return n + archiveConnectRequestBlockLength + varN
 }
 
