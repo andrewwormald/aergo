@@ -122,8 +122,11 @@ type fakeArchiveAeron struct {
 	replayChannel string
 	replayStream  int32
 	replayErr     error
+<<<<<<< HEAD
 	// replaySubscription, when set, is what addReplaySubscription returns.
 	replaySubscription *Subscription
+=======
+>>>>>>> origin/main
 }
 
 func newFakeArchiveAeron() *fakeArchiveAeron {
@@ -145,9 +148,12 @@ func (f *fakeArchiveAeron) addReplaySubscription(channel string, streamID int32)
 	if f.replayErr != nil {
 		return nil, f.replayErr
 	}
+<<<<<<< HEAD
 	if f.replaySubscription != nil {
 		return f.replaySubscription, nil
 	}
+=======
+>>>>>>> origin/main
 	return NewLoopbackSubscription(NewLoopbackLogBuffers(64*1024), streamID), nil
 }
 
