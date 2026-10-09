@@ -3,6 +3,7 @@ package aergo
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -10,7 +11,7 @@ import (
 // This is the pure Go implementation -- no C library required.
 type Aeron struct {
 	conductor *Conductor
-	closed    bool
+	closed    atomic.Bool
 }
 
 // publicationWaitTimeout is the deadline AddPublication and
@@ -198,9 +199,8 @@ func (c *Aeron) DoWork() int {
 
 // Close shuts down the client and releases resources.
 func (c *Aeron) Close() error {
-	if c.closed {
+	if c.closed.Swap(true) {
 		return nil
 	}
-	c.closed = true
 	return c.conductor.Close()
 }
