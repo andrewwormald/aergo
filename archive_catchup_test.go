@@ -20,7 +20,7 @@ func testFrame(k int64) catchUpFrame {
 	payload := make([]byte, testPayloadBytes)
 	binary.BigEndian.PutUint64(payload, uint64(k))
 	return catchUpFrame{
-		header:  Header{FrameLength: DataFrameHeaderLen + testPayloadBytes, Position: k * testFrameBytes},
+		header:  Header{FrameLength: DataFrameHeaderLen + testPayloadBytes, Position: k * testFrameBytes, TermOffset: int32((k - 1) * testFrameBytes)},
 		payload: payload,
 	}
 }
@@ -367,5 +367,61 @@ func TestArchiveCatchUpNeedsAReplayChannel(t *testing.T) {
 	a, _ := newConnectedArchive(t)
 	if _, err := a.CatchUp(context.Background(), nil, ArchiveCatchUpConfig{}); err == nil {
 		t.Error("a missing ReplayChannel should fail")
+	}
+}
+
+// A frame of testFrameBytes that starts at start.
+func frameStartingAt(start int64, termOffset int32) catchUpFrame {
+	f := testFrame(start/testFrameBytes + 1)
+	f.header.Position = start + testFrameBytes
+	f.header.TermOffset = termOffset
+	return f
+}
+
+func TestStreamGapTreatsTermEndPaddingAsContiguous(t *testing.T) {
+	const term = 1 << 20
+	tests := []struct {
+		name string
+		prev int64
+		h    Header
+		want int64
+	}{
+		{"contiguous", 960, Header{FrameLength: 64, Position: 960 + 64, TermOffset: 960}, 0},
+		{"gap inside a term", 960, Header{FrameLength: 64, Position: 1344, TermOffset: 1280}, 320},
+		{"padding before a term boundary", term - 64, Header{FrameLength: 64, Position: term + 64, TermOffset: 0}, 0},
+		{"overlap", 960, Header{FrameLength: 64, Position: 960, TermOffset: 896}, -64},
+		{"gap ending on a boundary but longer than any padding", 64, Header{FrameLength: 64, Position: term + 64, TermOffset: 0}, term - 64},
+	}
+	for _, tt := range tests {
+		if got := StreamGap(tt.prev, &tt.h); got != tt.want {
+			t.Errorf("%s: StreamGap = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+// Frames either side of a term boundary are not a gap, in the replay or the
+// live stream.
+func TestCatchUpCrossesATermBoundaryPadding(t *testing.T) {
+	const term = 1 << 20
+	before := frameStartingAt(term-96-64, 0) // ends 64 bytes short of the boundary
+	after := frameStartingAt(term, 0)        // padding filled the 64 bytes
+	after2 := frameStartingAt(term+testFrameBytes, testFrameBytes)
+
+	replay := &scriptedPoller{perPoll: 10, queue: []catchUpFrame{before, after}}
+	live := &scriptedPoller{perPoll: 10, queue: []catchUpFrame{after, after2}}
+	c := newArchiveCatchUp(live, replay, nil, ArchiveCatchUpConfig{StartPosition: term - 96 - 64})
+
+	var got []int64
+	for i := 0; i < 20 && len(got) < 3; i++ {
+		if _, err := c.Poll(func(_ []byte, h *Header) { got = append(got, h.Position) }, 10); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+	}
+	want := []int64{term - 64, term + testFrameBytes, term + 2*testFrameBytes}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("delivered %v, want %v", got, want)
+	}
+	if !c.Merged() || c.Restarts() != 0 {
+		t.Fatalf("merged=%v restarts=%d", c.Merged(), c.Restarts())
 	}
 }
