@@ -168,6 +168,27 @@ func frameStart(h *Header) int64 {
 	return h.Position - int64((h.FrameLength+DataFrameHeaderLen-1)&^(DataFrameHeaderLen-1))
 }
 
+// maxPaddingLength bounds a term-end padding frame: padding fills the space a
+// frame did not fit in, and a frame is never longer than the largest MTU.
+const maxPaddingLength = 64 * 1024
+
+// StreamGap returns how many bytes of stream position lie between prevEnd, the
+// end of the previous frame delivered, and the start of the frame h: 0 when
+// they join up, negative when h overlaps what was already delivered.
+//
+// A subscription consumes the padding frame that fills the end of a term
+// without delivering it, so the frame after it starts one padding frame past
+// prevEnd. That skip is not a gap, and StreamGap reports 0 for it: it is short
+// and ends on a term boundary (TermOffset 0). A real gap shorter than a padding
+// frame that ends exactly on a term boundary cannot be told apart from it.
+func StreamGap(prevEnd int64, h *Header) int64 {
+	gap := frameStart(h) - prevEnd
+	if gap > 0 && gap <= maxPaddingLength && h.TermOffset == 0 {
+		return 0
+	}
+	return gap
+}
+
 // Poll delivers up to fragmentLimit frames to handler and returns how many. It
 // returns an error once the catch-up has failed, and keeps returning it.
 func (c *ArchiveCatchUp) Poll(handler FragmentHandler, fragmentLimit int) (int, error) {
@@ -208,8 +229,7 @@ func (c *ArchiveCatchUp) Poll(handler FragmentHandler, fragmentLimit int) (int, 
 
 // bufferLive holds a live frame while the replay catches up.
 func (c *ArchiveCatchUp) bufferLive(buf []byte, h *Header) {
-	start := frameStart(h)
-	if len(c.queue) > 0 && c.liveEnd >= 0 && start != c.liveEnd {
+	if len(c.queue) > 0 && c.liveEnd >= 0 && StreamGap(c.liveEnd, h) != 0 {
 		// The live stream skipped positions: what is buffered no longer joins
 		// up with what comes next.
 		c.dropQueue()
@@ -235,13 +255,12 @@ func (c *ArchiveCatchUp) replayHandler(handler FragmentHandler) FragmentHandler 
 		if c.err != nil {
 			return
 		}
-		start := frameStart(h)
 		if c.position >= 0 {
 			if h.Position <= c.position {
 				return // already delivered
 			}
-			if start > c.position {
-				c.err = &ArchiveGapError{From: c.position, To: start}
+			if StreamGap(c.position, h) > 0 {
+				c.err = &ArchiveGapError{From: c.position, To: frameStart(h)}
 				return
 			}
 		}
@@ -256,7 +275,7 @@ func (c *ArchiveCatchUp) tryMerge() bool {
 	if len(c.queue) == 0 || c.position < 0 {
 		return false
 	}
-	if c.position < frameStart(&c.queue[0].header) {
+	if StreamGap(c.position, &c.queue[0].header) > 0 {
 		return false // the replay has not got there yet
 	}
 
@@ -270,7 +289,7 @@ func (c *ArchiveCatchUp) tryMerge() bool {
 		if c.position != c.liveEnd {
 			return false
 		}
-	} else if frameStart(&c.queue[drop].header) != c.position {
+	} else if StreamGap(c.position, &c.queue[drop].header) != 0 {
 		// The buffered frames do not start where the replay stopped. Start
 		// the buffer again from newer live frames.
 		c.dropQueue()
@@ -322,8 +341,8 @@ func (c *ArchiveCatchUp) liveHandler(handler FragmentHandler) FragmentHandler {
 		if h.Position <= c.position {
 			return
 		}
-		if start := frameStart(h); start > c.position {
-			c.err = &ArchiveGapError{From: c.position, To: start}
+		if StreamGap(c.position, h) > 0 {
+			c.err = &ArchiveGapError{From: c.position, To: frameStart(h)}
 			return
 		}
 		handler(buf, h)
