@@ -27,6 +27,13 @@ type Conductor struct {
 	// calls fail fast with fatalErr.
 	terminated atomic.Bool
 
+	// workMu serialises DoWork and Close, which share the driver broadcast
+	// receiver, the keepalive state and the mapped CnC file. It plays the part
+	// of the client lock in the Java client. DoWork only try-locks it, so a
+	// poll loop never waits on another goroutine; Close waits for it.
+	workMu sync.Mutex
+	closed bool // guarded by workMu
+
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
@@ -144,6 +151,14 @@ func (c *Conductor) ClientID() int64 { return c.clientID }
 
 // Close shuts down the conductor and releases resources.
 func (c *Conductor) Close() error {
+	// Wait for a DoWork in progress: it reads the mapped CnC file closed below.
+	c.workMu.Lock()
+	defer c.workMu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+
 	c.proxy.ClientClose()
 
 	c.mu.Lock()
@@ -251,7 +266,18 @@ func (c *Conductor) FindSubscription(corrID int64) *subscriptionState {
 
 // DoWork processes driver responses and sends keepalives.
 // Returns the number of work items processed.
+//
+// It is safe to call from several goroutines: a call that finds another
+// DoWork or Close in progress returns 0 at once and leaves the work to it.
 func (c *Conductor) DoWork() int {
+	if !c.workMu.TryLock() {
+		return 0
+	}
+	defer c.workMu.Unlock()
+	if c.closed {
+		return 0
+	}
+
 	workCount := c.broadcastRecv.Receive(c.onDriverMessage, 10)
 
 	now := time.Now().UnixNano()

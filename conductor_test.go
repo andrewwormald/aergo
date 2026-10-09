@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -518,4 +519,46 @@ func TestOnNewPublicationShortMessage(t *testing.T) {
 	c.onError(make([]byte, 5))
 	c.onAvailableImage(make([]byte, 10))
 	c.onUnavailableImage(make([]byte, 10))
+}
+
+// DoWork may be called from several goroutines (a poll loop and an Add* call
+// that waits on the driver, say). Run with -race.
+func TestConductorDoWorkIsSafeFromSeveralGoroutines(t *testing.T) {
+	c, _ := newInMemConductor(42)
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20000; i++ {
+				c.DoWork()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// Close waits for a DoWork in progress, and DoWork does nothing once closed.
+func TestConductorCloseRacesWithDoWorkSafely(t *testing.T) {
+	c, _ := newInMemConductor(42)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20000; i++ {
+			c.DoWork()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_ = c.Close()
+	}()
+	wg.Wait()
+
+	if got := c.DoWork(); got != 0 {
+		t.Fatalf("DoWork after Close returned %d", got)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
 }
