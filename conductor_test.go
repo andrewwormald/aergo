@@ -562,3 +562,71 @@ func TestConductorCloseRacesWithDoWorkSafely(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+// A publication must not be visible as ready before its log buffers are
+// mapped. FindPublication is polled from another goroutine while the driver's
+// reply is handled, as when DoWork runs in the background during AddPublication.
+func TestOnNewPublicationReadyImpliesLogBuffers(t *testing.T) {
+	const termLen = 64 * 1024
+	logFile := filepath.Join(t.TempDir(), "pub.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*termLen+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 200; i++ {
+		c := &Conductor{
+			publications:  make(map[int64]*publicationState),
+			subscriptions: make(map[int64]*subscriptionState),
+		}
+		const corrID = int64(42)
+		c.publications[corrID] = &publicationState{correlationID: corrID}
+
+		msg := make([]byte, 36+len(logFile))
+		binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))
+		binary.LittleEndian.PutUint32(msg[32:], uint32(len(logFile)))
+		copy(msg[36:], logFile)
+
+		// Look at the log buffers the instant the state is first seen ready,
+		// not afterwards, when the handler has long finished.
+		unmapped := make(chan bool, 1)
+		go func() {
+			for {
+				if st := c.FindPublication(corrID); st != nil {
+					c.mu.Lock()
+					unmapped <- st.logBuffers == nil
+					c.mu.Unlock()
+					return
+				}
+			}
+		}()
+		c.onNewPublication(msg)
+
+		if <-unmapped {
+			t.Fatalf("iteration %d: publication was ready before its log buffers were mapped", i)
+		}
+		c.publications[corrID].logBuffers.Close()
+	}
+}
+
+func TestOnNewPublicationMapFailureIsNotReady(t *testing.T) {
+	c := &Conductor{
+		publications:  make(map[int64]*publicationState),
+		subscriptions: make(map[int64]*subscriptionState),
+	}
+	const corrID = int64(7)
+	c.publications[corrID] = &publicationState{correlationID: corrID}
+
+	missing := filepath.Join(t.TempDir(), "absent.logbuffer")
+	msg := make([]byte, 36+len(missing))
+	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))
+	binary.LittleEndian.PutUint32(msg[32:], uint32(len(missing)))
+	copy(msg[36:], missing)
+	c.onNewPublication(msg)
+
+	if c.FindPublication(corrID) != nil {
+		t.Error("publication whose log could not be mapped is reported ready")
+	}
+	if c.pendingError(corrID) == nil {
+		t.Error("map failure not recorded against the pending add")
+	}
+}

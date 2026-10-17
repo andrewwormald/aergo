@@ -429,31 +429,31 @@ func (c *Conductor) onNewPublication(msg []byte) {
 		logFile = string(msg[36 : 36+logFileLen])
 	}
 
+	// Map the log before publishing the state. FindPublication returns the
+	// state as soon as it is ready, and a caller racing with this handler
+	// (DoWork on another goroutine) would otherwise build a Publication whose
+	// log buffers are still nil: it never connects and every offer says Closed.
+	var lb *LogBuffers
+	var mapErr error
+	if logFile != "" {
+		lb, mapErr = MapLogBuffers(logFile)
+	}
+
 	c.mu.Lock()
-	pub := c.publications[corrID]
-	if pub != nil {
+	if pub := c.publications[corrID]; pub != nil {
 		pub.registrationID = regID
 		pub.sessionID = sessionID
 		pub.posLimitCounterID = posLimitID
 		pub.channelStatusID = channelStatusID
 		pub.logBuffersPath = logFile
-		pub.ready = true
+		if mapErr != nil {
+			pub.err = fmt.Errorf("map log buffers %s: %w", logFile, mapErr)
+		} else {
+			pub.logBuffers = lb
+			pub.ready = true
+		}
 	}
 	c.mu.Unlock()
-
-	if logFile != "" {
-		lb, err := MapLogBuffers(logFile)
-		c.mu.Lock()
-		if pub != nil {
-			if err != nil {
-				pub.err = fmt.Errorf("map log buffers %s: %w", logFile, err)
-				pub.ready = false
-			} else {
-				pub.logBuffers = lb
-			}
-		}
-		c.mu.Unlock()
-	}
 }
 
 func (c *Conductor) onSubscriptionReady(msg []byte) {

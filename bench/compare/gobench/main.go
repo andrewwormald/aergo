@@ -47,6 +47,7 @@ func main() {
 	client, err := aergo.Connect(aergo.WithDir(*dir))
 	check(err)
 	defer client.Close()
+	defer startConductor(client)()
 
 	if *mode == "all" || *mode == "throughput" {
 		for _, size := range sizes {
@@ -63,12 +64,6 @@ func main() {
 // startConductor runs the client's DoWork in the background, standing in for
 // the conductor thread Java's client runs on its own. The Go client has none:
 // DoWork must be called to answer the driver and send keepalives.
-//
-// It is started only once the publications are connected. Running DoWork on
-// another goroutine while Add* and the connection are still being set up
-// intermittently left an IPC publication never connected (2 in 20 in a
-// stand-alone repro), which is a client problem tracked separately from this
-// comparison.
 func startConductor(client *aergo.Aeron) (stop func()) {
 	quit := make(chan struct{})
 	done := make(chan struct{})
@@ -128,7 +123,6 @@ func throughput(client *aergo.Aeron, size, count, repeats int) {
 	check(err)
 	defer sub.Close()
 	await(pub)
-	defer startConductor(client)()
 
 	src := make([]byte, size)
 	for run := 0; run <= repeats; run++ { // run 0 is a discarded warm-up
@@ -177,7 +171,6 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	defer pongSub.Close()
 	await(ping)
 	await(pong)
-	defer startConductor(client)()
 
 	src := make([]byte, size)
 	var stop atomic.Bool
