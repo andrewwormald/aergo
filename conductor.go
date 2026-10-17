@@ -63,10 +63,23 @@ type subscriptionState struct {
 	streamID        int32
 	channelStatusID int32
 	ready           bool
-	images          []*Image
+	images          []*Image // guarded by Conductor.mu
 	// err records the driver's rejection (RespOnError) of the add command so
 	// the pending AddSubscription call fails with it.
 	err error
+
+	// snapshot is an immutable copy of images that Subscription.Poll reads
+	// without taking any lock, as Java's Subscription reads its volatile
+	// image array. It is replaced, never modified, whenever images changes.
+	snapshot atomic.Pointer[[]*Image]
+}
+
+// publishImages makes the current images visible to Poll. The caller holds
+// Conductor.mu (or owns the state exclusively, as a fixture does).
+func (s *subscriptionState) publishImages() {
+	snap := make([]*Image, len(s.images))
+	copy(snap, s.images)
+	s.snapshot.Store(&snap)
 }
 
 // Image represents a subscription's connection to a publication.
@@ -542,6 +555,7 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	sub := c.subscriptions[subRegID]
 	if sub != nil {
 		sub.images = append(sub.images, img)
+		sub.publishImages()
 	}
 	c.mu.Unlock()
 }
@@ -562,6 +576,7 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 					img.LogBuffers.Close()
 				}
 				sub.images = append(sub.images[:i], sub.images[i+1:]...)
+				sub.publishImages()
 				break
 			}
 		}

@@ -26,6 +26,7 @@ type FragmentHandler func(buffer []byte, header *Header)
 // called from any goroutine.
 type Subscription struct {
 	conductor      *Conductor
+	state          *subscriptionState
 	channel        string
 	streamID       int32
 	registrationID int64
@@ -42,6 +43,7 @@ type Subscription struct {
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
 	return &Subscription{
 		conductor:      conductor,
+		state:          state,
 		channel:        state.channel,
 		streamID:       state.streamID,
 		registrationID: corrID,
@@ -55,18 +57,14 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		return 0
 	}
 
-	state := s.conductor.FindSubscription(s.registrationID)
-	if state == nil {
+	// Lock-free: the conductor publishes a fresh immutable slice whenever an
+	// image comes or goes, so polling never contends with other pollers or
+	// with the conductor.
+	snap := s.state.snapshot.Load()
+	if snap == nil {
 		return 0
 	}
-
-	// Snapshot under the lock, then iterate outside it. Appending into
-	// the retained scratch reuses its capacity instead of allocating a
-	// new slice on every poll.
-	s.conductor.mu.Lock()
-	images := make([]*Image, len(state.images))
-	copy(images, state.images)
-	s.conductor.mu.Unlock()
+	images := *snap
 
 	totalFragments := 0
 

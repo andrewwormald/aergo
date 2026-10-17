@@ -217,7 +217,7 @@ func newInMemSubscription(lb *LogBuffers, streamID int32) *Subscription {
 		subscriptions: map[int64]*subscriptionState{},
 	}
 	corrID := int64(1)
-	c.subscriptions[corrID] = &subscriptionState{
+	state := &subscriptionState{
 		correlationID: corrID,
 		channel:       "aeron:ipc",
 		streamID:      streamID,
@@ -227,8 +227,11 @@ func newInMemSubscription(lb *LogBuffers, streamID int32) *Subscription {
 			LogBuffers: lb,
 		}},
 	}
+	state.publishImages()
+	c.subscriptions[corrID] = state
 	return &Subscription{
 		conductor:      c,
+		state:          state,
 		channel:        "aeron:ipc",
 		streamID:       streamID,
 		registrationID: corrID,
