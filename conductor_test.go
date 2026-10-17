@@ -384,7 +384,7 @@ func TestOnClientTimeout(t *testing.T) {
 		lb := newInMemLogBuffers(offerTestTermLen)
 		pub := newInMemPublication(lb, 7, 1001)
 		pub.conductor = c
-		if got := pub.Offer(make([]byte, 8)); got != Closed {
+		if got, _ := pub.Offer(make([]byte, 8)); got != Closed {
 			t.Errorf("Offer after client timeout: got %d, want Closed", got)
 		}
 	})
@@ -448,7 +448,7 @@ func TestDoWorkTerminatesOnStaleDriverHeartbeat(t *testing.T) {
 	lb := newInMemLogBuffers(offerTestTermLen)
 	pub := newInMemPublication(lb, 7, 1001)
 	pub.conductor = c
-	if got := pub.Offer(make([]byte, 8)); got != Closed {
+	if got, _ := pub.Offer(make([]byte, 8)); got != Closed {
 		t.Errorf("Offer after driver timeout: got %d, want Closed", got)
 	}
 }

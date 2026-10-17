@@ -34,7 +34,7 @@ client, err := aergo.Connect(aergo.WithDir("/dev/shm/aeron-user"))
 
 // Create a publication
 pub, err := client.AddPublication("aeron:udp?endpoint=localhost:40123", 1001)
-pub.Offer([]byte("hello"))
+pos, err := pub.Offer([]byte("hello")) // pos < 0: NotConnected, BackPressured, ... (retry/react)
 
 // Create a subscription
 sub, err := client.AddSubscription("aeron:udp?endpoint=localhost:40123", 1001)
@@ -55,8 +55,14 @@ cc.Connect()
 for cc.State() != aergo.StateConnected {
     cc.Poll()
 }
-cc.Offer([]byte("hello cluster"))
+pos, err := cc.Offer([]byte("hello cluster"))
 ```
+
+### Message size
+
+`Offer` follows the Java client. A message longer than one frame (`pub.MaxPayloadLength()`, the MTU minus the 32-byte header) is split into fragments, so wrap your handler in a `FragmentAssembler` to receive it whole. One longer than `pub.MaxMessageLength()` (an eighth of the term length, at most 16 MiB) can never be sent: `Offer` returns a `*MessageTooLongError` (`errors.Is(err, aergo.ErrMessageTooLong)`) and writes nothing.
+
+The returned position is separate from the error. Back pressure and similar conditions are negative positions with a nil error, as in Java, so a retry loop stays cheap; the error is only for a message that cannot be sent however often you retry.
 
 ## Building the Media Driver
 

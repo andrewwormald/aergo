@@ -12,7 +12,7 @@ func TestOfferWithBackoffRidesOutLimitGap(t *testing.T) {
 	pub := newInMemPublication(newInMemLogBuffers(offerTestTermLen), 1, 1)
 	setInMemPosLimit(pub, 0)
 
-	if got := pub.Offer([]byte("x")); got != BackPressured {
+	if got, _ := pub.Offer([]byte("x")); got != BackPressured {
 		t.Fatalf("precondition: Offer with limit 0 = %d, want BackPressured", got)
 	}
 
@@ -21,7 +21,7 @@ func TestOfferWithBackoffRidesOutLimitGap(t *testing.T) {
 		setInMemPosLimit(pub, int64(offerTestTermLen))
 	}()
 
-	if got := pub.OfferWithBackoff(context.Background(), []byte("x"), 2*time.Second); got <= 0 {
+	if got, _ := pub.OfferWithBackoff(context.Background(), []byte("x"), 2*time.Second); got <= 0 {
 		t.Fatalf("OfferWithBackoff = %d, want a positive position", got)
 	}
 }
@@ -31,7 +31,7 @@ func TestOfferWithBackoffGivesUpAtTimeout(t *testing.T) {
 	setInMemPosLimit(pub, 0)
 
 	start := time.Now()
-	got := pub.OfferWithBackoff(context.Background(), []byte("x"), 50*time.Millisecond)
+	got, _ := pub.OfferWithBackoff(context.Background(), []byte("x"), 50*time.Millisecond)
 	if got != BackPressured {
 		t.Errorf("OfferWithBackoff = %d, want BackPressured", got)
 	}
@@ -47,7 +47,7 @@ func TestOfferWithBackoffStopsWhenContextEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	if got := pub.OfferWithBackoff(ctx, []byte("x"), 10*time.Second); got != BackPressured {
+	if got, _ := pub.OfferWithBackoff(ctx, []byte("x"), 10*time.Second); got != BackPressured {
 		t.Errorf("OfferWithBackoff = %d, want BackPressured", got)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -61,7 +61,7 @@ func TestOfferWithBackoffDoesNotRetryGone(t *testing.T) {
 	pub.closed.Store(true) // Close needs a conductor, which a loopback publication has none of
 
 	start := time.Now()
-	if got := pub.OfferWithBackoff(context.Background(), []byte("x"), 10*time.Second); got != Closed {
+	if got, _ := pub.OfferWithBackoff(context.Background(), []byte("x"), 10*time.Second); got != Closed {
 		t.Errorf("OfferWithBackoff = %d, want Closed", got)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {

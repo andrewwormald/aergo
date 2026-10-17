@@ -22,6 +22,7 @@ func newInMemLogBuffers(termLen int32) *LogBuffers {
 	lb.meta = WrapPtr(unsafe.Pointer(&data[metaOff]), LogMetaDataLength)
 
 	lb.meta.PutInt32(MetaTermLenOff, termLen)
+	lb.meta.PutInt32(MetaMtuLenOff, DefaultMtuLength)
 	lb.meta.PutInt32(MetaInitialTermIDOff, 0)
 	lb.meta.PutInt32Ordered(MetaIsConnectedOff, 1)
 
@@ -101,7 +102,7 @@ func zeroTerm(lb *LogBuffers, partIndex int, n int32) {
 func newInMemPublication(lb *LogBuffers, sessionID, streamID int32) *Publication {
 	counterValues := NewAtomicBuffer(make([]byte, CounterValueLength))
 	counterValues.PutInt64Ordered(0, math.MaxInt64)
-	return &Publication{
+	p := &Publication{
 		channel:           "aeron:ipc",
 		streamID:          streamID,
 		sessionID:         sessionID,
@@ -110,6 +111,8 @@ func newInMemPublication(lb *LogBuffers, sessionID, streamID int32) *Publication
 		posLimitCounterID: 0,
 		counterValues:     counterValues,
 	}
+	p.setLimits()
+	return p
 }
 
 // setInMemPosLimit sets the stubbed publication-limit counter value.

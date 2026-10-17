@@ -8,7 +8,7 @@ func TestLoopback_OfferThenPoll(t *testing.T) {
 	sub := NewLoopbackSubscription(lb, 1001)
 
 	payload := []byte{1, 2, 3, 4}
-	if pos := pub.Offer(payload); pos <= 0 {
+	if pos, _ := pub.Offer(payload); pos <= 0 {
 		t.Fatalf("Offer: got %d, want > 0", pos)
 	}
 
@@ -34,7 +34,7 @@ func TestLoopback_TryClaimThenPoll(t *testing.T) {
 	pub := NewLoopbackPublication(lb, 7, 1001)
 	sub := NewLoopbackSubscription(lb, 1001)
 
-	claim, pos := pub.TryClaim(4)
+	claim, pos, _ := pub.TryClaim(4)
 	if pos <= 0 {
 		t.Fatalf("TryClaim: got %d, want > 0", pos)
 	}
@@ -65,7 +65,7 @@ func TestLoopbackStreamsCloseWithoutADriver(t *testing.T) {
 	sub.Close()
 	pub.Close()
 	sub.Close()
-	if r := pub.Offer([]byte("x")); r != Closed {
+	if r, _ := pub.Offer([]byte("x")); r != Closed {
 		t.Errorf("Offer after Close = %d, want Closed", r)
 	}
 }

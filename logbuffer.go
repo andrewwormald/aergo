@@ -31,6 +31,18 @@ const (
 	FlagEndFrag   = 0x40
 	FlagUnfrag    = FlagBeginFrag | FlagEndFrag
 
+	// FrameAlignment is the alignment of every frame in a term, in bytes.
+	FrameAlignment = 32
+
+	// DefaultMtuLength is the Aeron default MTU, used for a log whose
+	// metadata carries no (or an unusable) MTU, which only hand-built logs
+	// do: the media driver always sets it.
+	DefaultMtuLength = 1408
+
+	// MaxMessageLengthCap is the largest message a publication accepts
+	// whatever its term length (Java FrameDescriptor.MAX_MESSAGE_LENGTH).
+	MaxMessageLengthCap = 16 * 1024 * 1024
+
 	// Metadata offsets within the log metadata section.
 	// Fields are padded to cache-line boundaries (PADDING_SIZE=64).
 	// Matches Java LogBufferDescriptor exactly.
@@ -46,6 +58,26 @@ const (
 	MetaTermLenOff         = 276 // int32
 	MetaPageSizeOff        = 280 // int32
 )
+
+// computeMaxMessageLength is the largest message a publication with the given
+// term length accepts (Java FrameDescriptor.computeMaxMessageLength): an
+// eighth of the term, capped at MaxMessageLengthCap.
+func computeMaxMessageLength(termLen int32) int32 {
+	return min(termLen>>3, MaxMessageLengthCap)
+}
+
+// computeFragmentedFrameLength is the number of term bytes a message of the
+// given length occupies once split into frames carrying at most
+// maxPayloadLength bytes each (Java LogBufferDescriptor.
+// computeFragmentedFrameLength).
+func computeFragmentedFrameLength(length, maxPayloadLength int32) int32 {
+	full := length / maxPayloadLength
+	last := int32(0)
+	if rem := length % maxPayloadLength; rem > 0 {
+		last = align(rem+DataFrameHeaderLen, FrameAlignment)
+	}
+	return full*(maxPayloadLength+DataFrameHeaderLen) + last
+}
 
 // LogBuffers represents a memory-mapped log buffer file.
 type LogBuffers struct {

@@ -65,7 +65,7 @@ func BenchmarkEndToEndSendReceive(b *testing.B) {
 				binary.LittleEndian.PutUint64(payload[16:], 42)
 				binary.LittleEndian.PutUint64(payload[24:], uint64(i))
 
-				writePos := pub.Offer(payload)
+				writePos, _ := pub.Offer(payload)
 				if writePos < 0 {
 					b.Fatalf("offer failed: %d", writePos)
 				}

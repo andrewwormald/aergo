@@ -21,7 +21,7 @@ func TestPoll_PublishesSubscriberPositionCounter(t *testing.T) {
 	const total = offerTestFramesPerTerm + 5
 	payload := make([]byte, offerTestPayloadLen)
 	for i := 0; i < total; i++ {
-		if pos := pub.OfferWithRetry(payload, 10); pos < 0 {
+		if pos, _ := pub.OfferWithRetry(payload, 10); pos < 0 {
 			t.Fatalf("failed to offer message %d: %d", i, pos)
 		}
 	}
@@ -80,7 +80,7 @@ func TestPoll_NoCounterConfigured(t *testing.T) {
 
 		payload := make([]byte, offerTestPayloadLen)
 		for i := 0; i < frames; i++ {
-			if pos := pub.OfferWithRetry(payload, 10); pos < 0 {
+			if pos, _ := pub.OfferWithRetry(payload, 10); pos < 0 {
 				t.Fatalf("failed to offer message %d: %d", i, pos)
 			}
 		}
@@ -103,7 +103,7 @@ func TestPoll_NoCounterConfigured(t *testing.T) {
 
 		payload := make([]byte, offerTestPayloadLen)
 		for i := 0; i < frames; i++ {
-			if pos := pub.OfferWithRetry(payload, 10); pos < 0 {
+			if pos, _ := pub.OfferWithRetry(payload, 10); pos < 0 {
 				t.Fatalf("failed to offer message %d: %d", i, pos)
 			}
 		}

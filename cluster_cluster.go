@@ -10,7 +10,7 @@ import (
 type Cluster interface {
 	Connect()
 	Poll() int
-	Offer(buf []byte) int64
+	Offer(buf []byte) (int64, error)
 	State() ClusterState
 	GracefulClose()
 	Close() error
@@ -171,9 +171,20 @@ func (c *AeronCluster) Poll() int {
 	return 0
 }
 
-func (c *AeronCluster) Offer(buf []byte) int64 {
+// Offer sends buf to the cluster as one ingress message.
+//
+// The session header is gathered in front of buf inside the publication, so
+// there is no copy into an intermediate buffer and no size limit of the
+// client's own: as in Java's AeronCluster.offer, a message longer than one
+// frame is fragmented, and one that the ingress publication cannot carry
+// (see Publication.MaxMessageLength; the 32-byte session header counts
+// towards it) is rejected with a *MessageTooLongError matching
+// ErrMessageTooLong. Otherwise the result is the new stream position, or a
+// negative NotConnected, BackPressured, AdminAction, Closed or
+// MaxPositionExceeded with a nil error.
+func (c *AeronCluster) Offer(buf []byte) (int64, error) {
 	if c.state != StateConnected {
-		return NotConnected
+		return NotConnected, nil
 	}
 
 	smh := SessionMessageHeader{
@@ -181,13 +192,12 @@ func (c *AeronCluster) Offer(buf []byte) int64 {
 		ClusterSessionId: c.clusterSessionId,
 	}
 	n := smh.Encode(c.sendBuf, 0)
-	copy(c.sendBuf[n:], buf)
 
 	pub := c.leaderPublication()
 	if pub == nil {
-		return NotConnected
+		return NotConnected, nil
 	}
-	return pub.Offer(c.sendBuf[:n+len(buf)])
+	return pub.OfferParts(c.sendBuf[:n], buf)
 }
 
 func (c *AeronCluster) GracefulClose() {
@@ -293,7 +303,11 @@ func (c *AeronCluster) sendConnectRequest() int {
 	// leader isn't known on the very first attempt, so any member is asked
 	// first, and later attempts target whoever REDIRECT actually named.
 	if pub := c.leaderPublication(); pub != nil && pub.IsConnected() {
-		result := pub.Offer(c.sendBuf[:n])
+		result, err := pub.Offer(c.sendBuf[:n])
+		if err != nil {
+			c.cfg.Listener.OnError(c, fmt.Errorf("send connect request: %w", err))
+			return 0
+		}
 		if result > 0 {
 			c.state = StateAwaitConnectReply
 			return 1
@@ -431,7 +445,7 @@ func (c *AeronCluster) sendCloseRequest() {
 	}
 	n := req.Encode(c.sendBuf, 0)
 	if pub := c.leaderPublication(); pub != nil {
-		pub.Offer(c.sendBuf[:n])
+		_, _ = pub.Offer(c.sendBuf[:n]) // best effort: the session times out on its own
 	}
 }
 
@@ -447,8 +461,10 @@ func (c *AeronCluster) handleChallenge(ch *Challenge) {
 	}
 	n := resp.Encode(c.sendBuf, 0)
 	if pub := c.leaderPublication(); pub != nil {
-		result := pub.Offer(c.sendBuf[:n])
-		if result <= 0 {
+		result, err := pub.Offer(c.sendBuf[:n])
+		if err != nil {
+			c.cfg.Listener.OnError(c, fmt.Errorf("send challenge response: %w", err))
+		} else if result <= 0 {
 			c.cfg.Listener.OnError(c, fmt.Errorf("send challenge response: offer result=%d", result))
 		}
 	}
@@ -461,7 +477,7 @@ func (c *AeronCluster) sendKeepAlive() {
 	}
 	n := ka.Encode(c.sendBuf, 0)
 	if pub := c.leaderPublication(); pub != nil {
-		pub.Offer(c.sendBuf[:n])
+		_, _ = pub.Offer(c.sendBuf[:n]) // best effort: the next interval retries
 	}
 }
 

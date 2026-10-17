@@ -34,7 +34,7 @@ func TestOffer_RotatesAtEndOfTerm(t *testing.T) {
 
 	lastPos := int64(0)
 	for i := 0; i < offerTestFramesPerTerm; i++ {
-		pos := pub.Offer(payload)
+		pos, _ := pub.Offer(payload)
 		if pos <= 0 {
 			t.Fatalf("offer %d: got %d, want > 0", i, pos)
 		}
@@ -46,7 +46,7 @@ func TestOffer_RotatesAtEndOfTerm(t *testing.T) {
 
 	// The next offer trips the end of the term: it must rotate and ask the
 	// caller to retry.
-	if got := pub.Offer(payload); got != AdminAction {
+	if got, _ := pub.Offer(payload); got != AdminAction {
 		t.Fatalf("offer at end of term: got %d, want AdminAction", got)
 	}
 
@@ -71,7 +71,7 @@ func TestOffer_RotatesAtEndOfTerm(t *testing.T) {
 	}
 
 	// The retried offer must land at offset 0 of partition 1 with termID 1.
-	pos := pub.Offer(payload)
+	pos, _ := pub.Offer(payload)
 	wantPos := int64(offerTestTermLen) + int64(offerTestAlignedLen)
 	if pos != wantPos {
 		t.Fatalf("offer after rotation: got position %d, want %d", pos, wantPos)
@@ -108,7 +108,7 @@ func TestOffer_FullCycleThroughAllPartitions(t *testing.T) {
 		if i > 10_000 {
 			t.Fatal("no progress after 10000 offers")
 		}
-		pos := pub.Offer(payload)
+		pos, _ := pub.Offer(payload)
 		if pos == AdminAction {
 			rotations++
 			continue
@@ -170,7 +170,7 @@ func TestOffer_ConcurrentOffersAcrossRotation(t *testing.T) {
 			for m := 0; m < msgsPerGoro; m++ {
 				ok := false
 				for attempt := 0; attempt < 1000; attempt++ {
-					pos := pub.Offer(payload)
+					pos, _ := pub.Offer(payload)
 					if pos == AdminAction {
 						continue // rotation: retry
 					}
@@ -249,25 +249,25 @@ func TestOffer_BackPressuredAtPositionLimit(t *testing.T) {
 
 	// position (0) >= limit (0): back-pressured.
 	setInMemPosLimit(pub, 0)
-	if got := pub.Offer(payload); got != BackPressured {
+	if got, _ := pub.Offer(payload); got != BackPressured {
 		t.Fatalf("offer with limit 0: got %d, want BackPressured", got)
 	}
 
 	// position (0) < limit (1): the offer proceeds.
 	setInMemPosLimit(pub, 1)
-	pos := pub.Offer(payload)
+	pos, _ := pub.Offer(payload)
 	if pos != int64(offerTestAlignedLen) {
 		t.Fatalf("offer with limit 1: got %d, want %d", pos, offerTestAlignedLen)
 	}
 
 	// position (160) >= limit (1): back-pressured again.
-	if got := pub.Offer(payload); got != BackPressured {
+	if got, _ := pub.Offer(payload); got != BackPressured {
 		t.Fatalf("offer past limit: got %d, want BackPressured", got)
 	}
 
 	// Raising the limit unblocks the publication.
 	setInMemPosLimit(pub, math.MaxInt64)
-	if got := pub.Offer(payload); got != pos+int64(offerTestAlignedLen) {
+	if got, _ := pub.Offer(payload); got != pos+int64(offerTestAlignedLen) {
 		t.Fatalf("offer after raising limit: got %d, want %d", got, pos+int64(offerTestAlignedLen))
 	}
 }
@@ -323,7 +323,7 @@ func TestOffer_MaxPositionExceeded(t *testing.T) {
 				packTail(maxTermCount, tc.tailOffset))
 
 			payload := make([]byte, offerTestPayloadLen)
-			if got := pub.Offer(payload); got != tc.want {
+			if got, _ := pub.Offer(payload); got != tc.want {
 				t.Fatalf("offer near max position %d: got %d, want %d", maxPos, got, tc.want)
 			}
 
@@ -348,7 +348,7 @@ func TestPoll_FollowsPublisherAcrossTermBoundary(t *testing.T) {
 		payload[0] = byte(i)
 		ok := false
 		for attempt := 0; attempt < 10; attempt++ {
-			if pos := pub.Offer(payload); pos > 0 {
+			if pos, _ := pub.Offer(payload); pos > 0 {
 				ok = true
 				break
 			}
@@ -394,7 +394,7 @@ func TestTryClaim_WriteDirectlyThenCommit(t *testing.T) {
 	lb := newInMemLogBuffers(offerTestTermLen)
 	pub := newInMemPublication(lb, 7, 1001)
 
-	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	claim, pos, _ := pub.TryClaim(offerTestPayloadLen)
 	if pos <= 0 {
 		t.Fatalf("TryClaim: got status %d, want > 0", pos)
 	}
@@ -444,7 +444,7 @@ func TestTryClaim_WriteDirectlyThenCommit(t *testing.T) {
 	}
 
 	// A subsequent claim must start immediately after the aligned frame.
-	claim2, pos2 := pub.TryClaim(offerTestPayloadLen)
+	claim2, pos2, _ := pub.TryClaim(offerTestPayloadLen)
 	if pos2 != int64(2*offerTestAlignedLen) {
 		t.Fatalf("second claim position: got %d, want %d", pos2, 2*offerTestAlignedLen)
 	}
@@ -455,7 +455,7 @@ func TestTryClaim_BufferAliasesTermBuffer(t *testing.T) {
 	lb := newInMemLogBuffers(offerTestTermLen)
 	pub := newInMemPublication(lb, 7, 1001)
 
-	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	claim, pos, _ := pub.TryClaim(offerTestPayloadLen)
 	if pos <= 0 {
 		t.Fatalf("TryClaim: got status %d, want > 0", pos)
 	}
@@ -472,7 +472,7 @@ func TestTryClaim_Abort(t *testing.T) {
 	lb := newInMemLogBuffers(offerTestTermLen)
 	pub := newInMemPublication(lb, 7, 1001)
 
-	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	claim, pos, _ := pub.TryClaim(offerTestPayloadLen)
 	if pos <= 0 {
 		t.Fatalf("TryClaim: got status %d, want > 0", pos)
 	}
@@ -490,7 +490,7 @@ func TestTryClaim_Abort(t *testing.T) {
 	// A subscriber must be able to skip over the aborted frame and see the
 	// next committed one.
 	sub := newInMemSubscription(lb, 1001)
-	claim2, pos2 := pub.TryClaim(offerTestPayloadLen)
+	claim2, pos2, _ := pub.TryClaim(offerTestPayloadLen)
 	if pos2 <= 0 {
 		t.Fatalf("second TryClaim: got status %d, want > 0", pos2)
 	}
@@ -511,21 +511,21 @@ func TestTryClaim_RotatesAtEndOfTerm(t *testing.T) {
 	pub := newInMemPublication(lb, 7, 1001)
 
 	for i := 0; i < offerTestFramesPerTerm; i++ {
-		claim, pos := pub.TryClaim(offerTestPayloadLen)
+		claim, pos, _ := pub.TryClaim(offerTestPayloadLen)
 		if pos <= 0 {
 			t.Fatalf("claim %d: got status %d, want > 0", i, pos)
 		}
 		claim.Commit()
 	}
 
-	if _, status := pub.TryClaim(offerTestPayloadLen); status != AdminAction {
+	if _, status, _ := pub.TryClaim(offerTestPayloadLen); status != AdminAction {
 		t.Fatalf("claim at end of term: got %d, want AdminAction", status)
 	}
 	if got := lb.ActiveTermCount(); got != 1 {
 		t.Fatalf("activeTermCount: got %d, want 1", got)
 	}
 
-	claim, pos := pub.TryClaim(offerTestPayloadLen)
+	claim, pos, _ := pub.TryClaim(offerTestPayloadLen)
 	wantPos := int64(offerTestTermLen) + int64(offerTestAlignedLen)
 	if pos != wantPos {
 		t.Fatalf("claim after rotation: got position %d, want %d", pos, wantPos)
@@ -538,7 +538,7 @@ func TestTryClaim_BackPressuredAtPositionLimit(t *testing.T) {
 	pub := newInMemPublication(lb, 7, 1001)
 
 	setInMemPosLimit(pub, 0)
-	if _, status := pub.TryClaim(offerTestPayloadLen); status != BackPressured {
+	if _, status, _ := pub.TryClaim(offerTestPayloadLen); status != BackPressured {
 		t.Fatalf("claim with limit 0: got %d, want BackPressured", status)
 	}
 }
