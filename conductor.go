@@ -34,6 +34,14 @@ type Conductor struct {
 	workMu sync.Mutex
 	closed bool // guarded by workMu
 
+	// logs caches the mapped log files by path, with a reference count per
+	// mapping, as Java's LogBuffers factory does. A publication and the image
+	// of a subscription on the same stream (every IPC stream, and any stream
+	// both sent and received by this client) share one mapping instead of
+	// each faulting in its own copy of the pages.
+	logsMu sync.Mutex
+	logs   map[string]*LogBuffers
+
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
@@ -179,13 +187,13 @@ func (c *Conductor) Close() error {
 
 	for _, pub := range c.publications {
 		if pub.logBuffers != nil {
-			pub.logBuffers.Close()
+			c.releaseLog(pub.logBuffers)
 		}
 	}
 	for _, sub := range c.subscriptions {
 		for _, img := range sub.images {
 			if img.LogBuffers != nil {
-				img.LogBuffers.Close()
+				c.releaseLog(img.LogBuffers)
 			}
 		}
 	}
@@ -417,6 +425,44 @@ func (c *Conductor) checkDriverLiveness(nowMs int64) error {
 	return nil
 }
 
+// acquireLog returns the mapping of a log file, mapping it on first use. Each
+// call must be paired with a releaseLog.
+func (c *Conductor) acquireLog(path string) (*LogBuffers, error) {
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	if lb := c.logs[path]; lb != nil {
+		lb.refs++
+		return lb, nil
+	}
+	lb, err := MapLogBuffers(path)
+	if err != nil {
+		return nil, err
+	}
+	lb.path, lb.refs = path, 1
+	if c.logs == nil {
+		c.logs = make(map[string]*LogBuffers)
+	}
+	c.logs[path] = lb
+	return lb, nil
+}
+
+// releaseLog drops one reference to a mapping from acquireLog and unmaps it
+// with the last. A mapping that did not come from acquireLog is closed.
+func (c *Conductor) releaseLog(lb *LogBuffers) {
+	if lb == nil {
+		return
+	}
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	if lb.path != "" && c.logs[lb.path] == lb {
+		if lb.refs--; lb.refs > 0 {
+			return
+		}
+		delete(c.logs, lb.path)
+	}
+	lb.Close()
+}
+
 func (c *Conductor) onNewPublication(msg []byte) {
 	if len(msg) < 36 {
 		return
@@ -449,7 +495,7 @@ func (c *Conductor) onNewPublication(msg []byte) {
 	var lb *LogBuffers
 	var mapErr error
 	if logFile != "" {
-		lb, mapErr = MapLogBuffers(logFile)
+		lb, mapErr = c.acquireLog(logFile)
 	}
 
 	c.mu.Lock()
@@ -535,7 +581,7 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 		joinPos = counterValues.GetInt64Volatile(subPosID * CounterValueLength)
 	}
 
-	lb, err := MapLogBuffers(logFile)
+	lb, err := c.acquireLog(logFile)
 	if err != nil {
 		return
 	}
@@ -572,9 +618,7 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 	if sub != nil {
 		for i, img := range sub.images {
 			if img.CorrelationID == corrID {
-				if img.LogBuffers != nil {
-					img.LogBuffers.Close()
-				}
+				c.releaseLog(img.LogBuffers)
 				sub.images = append(sub.images[:i], sub.images[i+1:]...)
 				sub.publishImages()
 				break

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/andrewwormald/aergo"
@@ -36,6 +37,7 @@ func main() {
 	repeats := flag.Int("repeats", 5, "measured throughput runs per size")
 	latCount := flag.Int("latcount", 200000, "latency samples")
 	latWarmup := flag.Int("latwarmup", 50000, "latency warm-up round trips")
+	conductor := flag.Bool("conductor", true, "run DoWork on a background goroutine")
 	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	flag.Parse()
 	if *cpuprofile != "" {
@@ -55,7 +57,9 @@ func main() {
 	client, err := aergo.Connect(aergo.WithDir(*dir))
 	check(err)
 	defer client.Close()
-	defer startConductor(client)()
+	if *conductor {
+		defer startConductor(client)()
+	}
 
 	if *mode == "all" || *mode == "throughput" {
 		for _, size := range sizes {
@@ -194,6 +198,8 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	var ru0 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
 	got := 0
 	reply := aergo.NewFragmentAssembler(func([]byte, *aergo.Header) { got++ })
 	samples := make([]int64, count)
@@ -212,6 +218,8 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	stop.Store(true)
 	<-ponged
 
+	var ru1 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
 	sort.Slice(samples, func(a, b int) bool { return samples[a] < samples[b] })
 	pct := func(p float64) int64 {
 		idx := int(p*float64(len(samples))+0.999999999) - 1
@@ -220,6 +228,6 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 		}
 		return samples[idx]
 	}
-	fmt.Printf("RESULT lang=go mode=latency size=%d samples=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d\n",
-		size, count, pct(0.50), pct(0.90), pct(0.99), pct(0.999), samples[len(samples)-1])
+	fmt.Printf("RESULT lang=go mode=latency size=%d samples=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d minflt=%d\n",
+		size, count, pct(0.50), pct(0.90), pct(0.99), pct(0.999), samples[len(samples)-1], ru1.Minflt-ru0.Minflt)
 }

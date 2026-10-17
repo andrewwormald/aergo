@@ -630,3 +630,47 @@ func TestOnNewPublicationMapFailureIsNotReady(t *testing.T) {
 		t.Error("map failure not recorded against the pending add")
 	}
 }
+
+// A publication and the image of a subscription on the same stream use the
+// same log file; the client maps it once and unmaps it when both are done.
+func TestLogBuffersAreSharedAndReferenceCounted(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "shared.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+
+	a, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatal("the same log file was mapped twice")
+	}
+
+	c.releaseLog(a)
+	if a.data == nil {
+		t.Fatal("log unmapped while a reference was still held")
+	}
+	c.releaseLog(b)
+	if a.data != nil {
+		t.Error("log still mapped after the last reference was released")
+	}
+	if len(c.logs) != 0 {
+		t.Errorf("cache still holds %d entries", len(c.logs))
+	}
+
+	// After the last release a new acquire maps afresh.
+	d, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == a {
+		t.Error("a released mapping was handed out again")
+	}
+	c.releaseLog(d)
+}

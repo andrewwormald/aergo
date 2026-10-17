@@ -3,6 +3,8 @@ import io.aeron.FragmentAssembler;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -157,6 +159,7 @@ public final class Bench
             });
             ponger.start();
 
+            final long flt0 = minorFaults();
             final int[] got = new int[1];
             final FragmentAssembler reply = new FragmentAssembler((b, o, l, h) -> got[0]++);
             final long[] samples = new long[count];
@@ -178,9 +181,25 @@ public final class Bench
             stop = true;
             ponger.join();
 
+            final long faults = minorFaults() - flt0;
             Arrays.sort(samples);
-            System.out.printf("RESULT lang=java mode=latency size=%d samples=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d%n",
-                size, count, pct(samples, 0.50), pct(samples, 0.90), pct(samples, 0.99), pct(samples, 0.999), samples[count - 1]);
+            System.out.printf("RESULT lang=java mode=latency size=%d samples=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d minflt=%d%n",
+                size, count, pct(samples, 0.50), pct(samples, 0.90), pct(samples, 0.99), pct(samples, 0.999), samples[count - 1], faults);
+        }
+    }
+
+    /** Minor page faults of this process so far (field 10 of /proc/self/stat). */
+    static long minorFaults()
+    {
+        try
+        {
+            final String stat = new String(Files.readAllBytes(Paths.get("/proc/self/stat")));
+            final String[] f = stat.substring(stat.lastIndexOf(')') + 2).split(" ");
+            return Long.parseLong(f[7]); // fields after the command name: state is f[0], minflt is f[7]
+        }
+        catch (final Exception e)
+        {
+            return -1;
         }
     }
 

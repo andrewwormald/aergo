@@ -86,6 +86,11 @@ type LogBuffers struct {
 	terms   [PartitionCount]*AtomicBuffer
 	meta    *AtomicBuffer
 
+	// path and refs are managed by the Conductor's log cache: one mapping of
+	// a log file is shared by the publication and the images that use it.
+	path string
+	refs int
+
 	// heapData holds a hard reference to a heap-allocated backing array for
 	// loopback (non-mmap'd) instances built via NewLoopbackLogBuffers, so the
 	// GC can't collect it out from under the AtomicBuffers in terms/meta
