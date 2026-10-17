@@ -269,15 +269,17 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	base := time.Now()
 	for i := 0; i < warmup+count; i++ {
 		got = 0
-		t0 := time.Now()
+		// time.Since(base) is a single monotonic clock read, as System.nanoTime
+		// is; time.Now() reads the wall clock as well and costs about twice as much.
+		t0 := int64(time.Since(base))
 		offer(ping, src)
 		for got == 0 {
 			pongSub.Poll(reply.OnFragment, fragmentLimit)
 		}
-		rtt := time.Since(t0).Nanoseconds()
+		rtt := int64(time.Since(base)) - t0
 		if i >= warmup {
 			samples[i-warmup] = rtt
-			starts[i-warmup] = t0.Sub(base).Nanoseconds()
+			starts[i-warmup] = t0
 		}
 	}
 	stop.Store(true)

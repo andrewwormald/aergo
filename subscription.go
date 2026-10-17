@@ -41,7 +41,6 @@ type Subscription struct {
 	// Both are handed to the handler, which is why the contract above
 	// says they are only valid for the duration of the call.
 	headerScratch Header
-	frameScratch  DataFrameHeader
 }
 
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
@@ -68,11 +67,9 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 	if snap == nil {
 		return 0
 	}
-	images := *snap
 
 	totalFragments := 0
-
-	for _, img := range images {
+	for _, img := range *snap {
 		if img.LogBuffers == nil {
 			continue
 		}
@@ -80,55 +77,72 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		if remaining <= 0 {
 			break
 		}
+		totalFragments += s.pollImage(img, handler, remaining)
+	}
 
-		termLen := img.LogBuffers.TermLength()
-		shift := numberOfTrailingZeros(uint32(termLen))
-		initialTermID := img.LogBuffers.InitialTermID()
+	return totalFragments
+}
 
-		position := img.subscriberPosition
-		termID := initialTermID + int32(position>>shift)
-		termOffset := int32(position) & (termLen - 1)
-		partIndex := int((termID - initialTermID) % PartitionCount)
-		term := img.LogBuffers.Term(partIndex)
+// pollImage reads up to limit fragments from one image. It is the same walk of
+// the term as ReadTerm, written out so the hot path is one loop with no
+// closure and no intermediate header: a handler call per fragment, straight
+// from the log. Java's Image.poll / TermReader.read do the same.
+func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int) int {
+	lb := img.LogBuffers
+	termLen := lb.TermLength()
+	shift := numberOfTrailingZeros(uint32(termLen))
+	initialTermID := lb.InitialTermID()
 
-		fragments, newOffset := readTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
+	position := img.subscriberPosition
+	termID := initialTermID + int32(position>>shift)
+	termOffset := int32(position) & (termLen - 1)
+	term := lb.Term(int((termID - initialTermID) % PartitionCount))
+	capacity := term.Capacity()
+	termStart := position - int64(termOffset) // stream position of this term's first byte
+
+	offset := termOffset
+	fragments := 0
+	for fragments < limit && offset < capacity {
+		frameLen := term.GetInt32Volatile(offset + FrameLengthOffset)
+		if frameLen <= 0 {
+			break // no more committed frames
+		}
+		aligned := align(frameLen, DataFrameHeaderLen)
+
+		if int16(term.GetInt32(offset+FrameTypeOffset)) != FrameTypePadding {
 			// The handler gets a view straight into the log, as Java's
 			// FragmentHandler does, so the payload is not copied unless the
 			// handler copies it. The header is reused across fragments. Both
 			// are valid only for the duration of the call.
-			if length < 0 || int64(offset)+int64(length) > int64(buf.Capacity()) {
-				return // a frame length the term cannot hold; do not read past it
+			length := frameLen - DataFrameHeaderLen
+			if length >= 0 && int64(offset)+int64(frameLen) <= int64(capacity) {
+				s.headerScratch = Header{
+					FrameLength:   frameLen,
+					Flags:         term.GetUint8(offset + FrameFlagsOffset),
+					SessionID:     term.GetInt32(offset + FrameSessionIDOff),
+					StreamID:      term.GetInt32(offset + FrameStreamIDOff),
+					TermID:        term.GetInt32(offset + FrameTermIDOff),
+					TermOffset:    term.GetInt32(offset + FrameTermOffsetOff),
+					ReservedValue: term.GetInt64(offset + FrameReservedValueOff),
+					Position:      termStart + int64(offset) + int64(aligned),
+				}
+				handler(term.Slice(offset+DataFrameHeaderLen, length), &s.headerScratch)
 			}
-			payload := buf.Slice(offset, length)
-
-			alignedFrame := align(hdr.FrameLength, DataFrameHeaderLen)
-			pos := computePosition(hdr.TermID, hdr.TermOffset+alignedFrame, termLen, initialTermID)
-
-			s.headerScratch = Header{
-				FrameLength:   hdr.FrameLength,
-				Flags:         hdr.Flags,
-				SessionID:     hdr.SessionID,
-				StreamID:      hdr.StreamID,
-				TermID:        hdr.TermID,
-				TermOffset:    hdr.TermOffset,
-				ReservedValue: hdr.ReservedValue,
-				Position:      pos,
-			}
-			handler(payload, &s.headerScratch)
-		}, remaining, &s.frameScratch)
-
-		// Advance even when only padding was consumed (fragments == 0 but
-		// the offset moved) so the reader can cross a term boundary. Every
-		// advance is also published to the driver's subscriber position
-		// counter so flow control does not stall the publication.
-		if newOffset > termOffset {
-			img.updatePosition(computePosition(termID, newOffset, termLen, initialTermID))
+			fragments++
 		}
 
-		totalFragments += fragments
+		offset += aligned
 	}
 
-	return totalFragments
+	// Advance even when only padding was consumed (fragments == 0 but the
+	// offset moved) so the reader can cross a term boundary. Every advance is
+	// also published to the driver's subscriber position counter so flow
+	// control does not stall the publication.
+	if offset > termOffset {
+		img.updatePosition(position + int64(offset-termOffset))
+	}
+
+	return fragments
 }
 
 // StreamID returns the stream identifier.
