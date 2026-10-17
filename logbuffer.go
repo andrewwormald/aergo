@@ -267,16 +267,26 @@ func ReadTerm(
 	handler TermFragmentHandler,
 	fragmentLimit int,
 ) (int, int32) {
+	// Its address is passed to the handler, so it escapes. Callers that
+	// poll repeatedly should use readTerm with a header they own, so the
+	// escape costs one allocation per call only here.
+	var hdr DataFrameHeader
+	return readTerm(term, termOffset, handler, fragmentLimit, &hdr)
+}
+
+// readTerm is ReadTerm with the scratch header supplied by the caller.
+// The handler may only use hdr for the duration of the call, which is
+// Aeron's contract.
+func readTerm(
+	term *AtomicBuffer,
+	termOffset int32,
+	handler TermFragmentHandler,
+	fragmentLimit int,
+	hdr *DataFrameHeader,
+) (int, int32) {
 	fragmentsRead := 0
 	offset := termOffset
 	capacity := term.Capacity()
-
-	// Declared outside the loop and reused. Its address is passed to the
-	// handler, so it escapes whatever we do - but escaping once per call
-	// rather than once per fragment is the difference between no garbage
-	// and garbage proportional to throughput. The handler may only use
-	// it for the duration of the call, which is Aeron's contract.
-	var hdr DataFrameHeader
 
 	for fragmentsRead < fragmentLimit && offset < capacity {
 		frameLen := term.GetInt32Volatile(offset + FrameLengthOffset)
@@ -288,7 +298,7 @@ func ReadTerm(
 		frameType := int16(term.GetInt32(offset + FrameTypeOffset))
 
 		if frameType != int16(FrameTypePadding) {
-			hdr = DataFrameHeader{
+			*hdr = DataFrameHeader{
 				FrameLength:   frameLen,
 				Version:       term.GetUint8(offset + FrameVersionOffset),
 				Flags:         term.GetUint8(offset + FrameFlagsOffset),
@@ -302,7 +312,7 @@ func ReadTerm(
 
 			payloadOffset := offset + DataFrameHeaderLen
 			payloadLen := frameLen - DataFrameHeaderLen
-			handler(term, payloadOffset, payloadLen, &hdr)
+			handler(term, payloadOffset, payloadLen, hdr)
 			fragmentsRead++
 		}
 

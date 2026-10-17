@@ -36,6 +36,7 @@ type Subscription struct {
 	// says they are only valid for the duration of the call.
 	payloadScratch []byte
 	headerScratch  Header
+	frameScratch   DataFrameHeader
 }
 
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
@@ -88,7 +89,7 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		partIndex := int((termID - initialTermID) % PartitionCount)
 		term := img.LogBuffers.Term(partIndex)
 
-		fragments, newOffset := ReadTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
+		fragments, newOffset := readTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
 			// Reuse the buffer and header across fragments rather than
 			// allocating a pair per message. Both are only valid for the
 			// duration of the handler call, which is the contract Aeron
@@ -121,7 +122,7 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 				Position:      pos,
 			}
 			handler(payload, &s.headerScratch)
-		}, remaining)
+		}, remaining, &s.frameScratch)
 
 		// Advance even when only padding was consumed (fragments == 0 but
 		// the offset moved) so the reader can cross a term boundary. Every
