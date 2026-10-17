@@ -3,6 +3,7 @@ package aergo
 import (
 	"context"
 	"math"
+	"math/bits"
 	"sync/atomic"
 	"time"
 )
@@ -308,13 +309,5 @@ func computePosition(termID, termOffset, termLen, initialTermID int32) int64 {
 }
 
 func numberOfTrailingZeros(v uint32) int {
-	if v == 0 {
-		return 32
-	}
-	n := 0
-	for v&1 == 0 {
-		n++
-		v >>= 1
-	}
-	return n
+	return bits.TrailingZeros32(v)
 }
