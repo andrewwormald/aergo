@@ -1,34 +1,51 @@
 #!/usr/bin/env python3
-"""Summarise run.sh output: median throughput and latency per size, Java vs Go."""
+"""Summarise run.sh output as absolute numbers, one column per client.
+
+Throughput is the median over all runs; latency is the median of the per-round
+percentiles, in microseconds.
+"""
 import re
 import statistics
 import sys
 from collections import defaultdict
 
 thr = defaultdict(list)  # (lang, size) -> msgs_per_sec
-lat = defaultdict(list)  # (lang, size) -> {p50,..}
+mbs = defaultdict(list)  # (lang, size) -> mb_per_sec
+lat = defaultdict(list)  # (lang, size) -> [{p50_ns, ...}]
+langs = []
 for line in open(sys.argv[1]):
     if not line.startswith("RESULT"):
         continue
     kv = dict(re.findall(r"(\w+)=(\S+)", line))
-    key = (kv["lang"], int(kv["size"]))
+    lang = kv["lang"]
+    if lang not in langs:
+        langs.append(lang)
+    key = (lang, int(kv["size"]))
     if kv["mode"] == "throughput":
         thr[key].append(float(kv["msgs_per_sec"]))
+        mbs[key].append(float(kv["mb_per_sec"]))
     else:
         lat[key].append({k: int(kv[k]) for k in ("p50_ns", "p90_ns", "p99_ns", "p999_ns")})
 
+order = [l for l in ("java", "go", "go-main") if l in langs] + [l for l in langs if l not in ("java", "go", "go-main")]
 sizes = sorted({s for _, s in thr})
-print("THROUGHPUT (median msgs/s over all runs; spread = min..max)")
-print(f"{'size':>5} {'java':>12} {'go':>12} {'go/java':>8}   java spread          go spread")
-for s in sizes:
-    j, g = thr[("java", s)], thr[("go", s)]
-    mj, mg = statistics.median(j), statistics.median(g)
-    print(f"{s:>5} {mj:>12,.0f} {mg:>12,.0f} {mg/mj:>7.2f}x   {min(j)/1e6:5.2f}..{max(j)/1e6:5.2f}M   {min(g)/1e6:5.2f}..{max(g)/1e6:5.2f}M")
+w = 12
 
-print("\nLATENCY round trip, ns (median of the per-round values)")
-print(f"{'size':>5} {'pct':>5} {'java':>9} {'go':>9} {'go/java':>8}")
+
+def header(title, unit):
+    print(f"\n{title} ({unit})")
+    print(f"{'size':>6} " + " ".join(f"{l:>{w}}" for l in order))
+
+
+header("THROUGHPUT, messages per second, median", "millions")
 for s in sizes:
-    for p in ("p50_ns", "p90_ns", "p99_ns", "p999_ns"):
-        mj = statistics.median(x[p] for x in lat[("java", s)])
-        mg = statistics.median(x[p] for x in lat[("go", s)])
-        print(f"{s:>5} {p[:-3]:>5} {mj:>9,.0f} {mg:>9,.0f} {mg/mj:>7.2f}x")
+    print(f"{s:>5}B " + " ".join(f"{statistics.median(thr[(l, s)]) / 1e6:>{w}.2f}" for l in order))
+
+header("THROUGHPUT, data rate, median", "MB per second")
+for s in sizes:
+    print(f"{s:>5}B " + " ".join(f"{statistics.median(mbs[(l, s)]):>{w},.0f}" for l in order))
+
+for p, name in (("p50_ns", "p50"), ("p90_ns", "p90"), ("p99_ns", "p99"), ("p999_ns", "p99.9")):
+    header(f"LATENCY round trip {name}, median of rounds", "microseconds")
+    for s in sizes:
+        print(f"{s:>5}B " + " ".join(f"{statistics.median(x[p] for x in lat[(l, s)]) / 1000:>{w}.2f}" for l in order))

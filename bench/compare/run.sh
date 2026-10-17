@@ -9,7 +9,9 @@
 #   QUICK=1 bench/compare/run.sh         small counts, to check the setup
 #
 # Environment: ROUNDS (2), AERON_VERSION (1.53.3), AERON_JAR, DRIVER_CPUS,
-# CLIENT_CPUS, SIZES, OUT (bench/compare/results.txt).
+# CLIENT_CPUS, SIZES, OUT (bench/compare/results.txt), and EXTRA_GO: a space
+# separated list of other Go harness binaries to include (for example one built
+# from another branch; each reports its own lang= label).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -65,10 +67,19 @@ for _ in $(seq 100); do [[ -f "$dir/cnc.dat" ]] && break; sleep 0.1; done
   echo "# go:      $(go version), aergo $(git -C "$root" rev-parse --short HEAD)"
   echo "# driver:  threading=DEDICATED cpus=${driver_pin[*]:-unpinned}; clients cpus=${client_pin[*]:-unpinned}"
   echo "# args:    ${args[*]} rounds=$rounds"
+  runners=(java go)
+  for extra in ${EXTRA_GO:-}; do runners+=("$extra"); done
   for r in $(seq "$rounds"); do
-    echo "# round $r: java"
-    "${client_pin[@]}" java "${jvm[@]}" -cp "$jar:$work/classes" Bench -dir="$dir" "${args[@]}" 2>&1 | grep -v 'Picked up' | sed "s/^RESULT /RESULT round=$r /"
-    echo "# round $r: go"
-    "${client_pin[@]}" "$work/gobench" -dir="$dir" "${args[@]}" 2>&1 | sed "s/^RESULT /RESULT round=$r /"
+    # Rotate who goes first each round so nobody always runs on a quiet or a
+    # busy machine.
+    for k in $(seq 0 $((${#runners[@]} - 1))); do
+      who="${runners[$(((k + r - 1) % ${#runners[@]}))]}"
+      echo "# round $r: $who"
+      case "$who" in
+        java) "${client_pin[@]}" java "${jvm[@]}" -cp "$jar:$work/classes" Bench -dir="$dir" "${args[@]}" 2>&1 | grep -v 'Picked up' ;;
+        go) "${client_pin[@]}" "$work/gobench" -dir="$dir" "${args[@]}" 2>&1 ;;
+        *) "${client_pin[@]}" "$who" -dir="$dir" "${args[@]}" 2>&1 ;;
+      esac | sed "s/^RESULT /RESULT round=$r /"
+    done
   done
 } | tee "$out"
