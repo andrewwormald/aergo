@@ -260,7 +260,7 @@ func (a *TermAppender) Append(
 	}
 
 	// Write frame header
-	a.term.PutInt32(termOffset+FrameLengthOffset, 0) // uncommitted
+	a.term.PutInt32Ordered(termOffset+FrameLengthOffset, 0) // uncommitted; read atomically by Poll
 	a.term.PutUint8(termOffset+FrameVersionOffset, 0)
 	a.term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
 	a.term.PutInt16(termOffset+FrameTypeOffset, FrameTypeData)

@@ -460,6 +460,7 @@ func (p *Publication) Close() {
 		if p.conductor != nil && p.conductor.proxy != nil {
 			p.conductor.proxy.RemovePublication(p.registrationID)
 			p.conductor.lingerPublicationLog(p.state)
+			p.conductor.forgetPublication(p.state)
 		}
 	}
 }

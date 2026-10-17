@@ -3,6 +3,8 @@ package aergo
 import (
 	"fmt"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -100,9 +102,17 @@ type AeronCluster struct {
 	// egressFragments reassembles fragmented egress messages for dispatchEgress.
 	// It holds partial messages, so it is replaced with each egress subscription.
 	egressFragments FragmentHandler
-	egressStage     ClusterState // state the current poll started in
-	egressWork      int          // messages handled by the current poll
-	ingressPubs     []*Publication
+	egressAssembler *FragmentAssembler
+
+	// egressEnded collects the sessions whose egress image went away. The
+	// notification comes from the goroutine running DoWork; the assembler belongs
+	// to the one polling, so they are handed over here and freed on the next poll.
+	egressEndedMu sync.Mutex
+	egressEnded   []int32
+	egressEndedN  atomic.Int32
+	egressStage   ClusterState // state the current poll started in
+	egressWork    int          // messages handled by the current poll
+	ingressPubs   []*Publication
 
 	leaderMemberId    int32
 	leadershipTermId  int64
@@ -120,7 +130,16 @@ type AeronCluster struct {
 }
 
 func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
-	ac, err := Connect(WithDir(cfg.AeronDir))
+	// Errors the client finds with no caller to return to (a log that cannot be
+	// mapped, a corrupt frame) go to the listener, as the rest of the poll-driven
+	// state machine's do. They arise inside Poll, so the listener is called on
+	// the polling goroutine.
+	var cluster *AeronCluster
+	ac, err := Connect(WithDir(cfg.AeronDir), WithErrorHandler(func(err error) {
+		if cluster != nil {
+			cluster.cfg.Listener.OnError(cluster, err)
+		}
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("create aeron client: %w", err)
 	}
@@ -130,13 +149,14 @@ func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
 		bufSize = 4096
 	}
 
-	return &AeronCluster{
+	cluster = &AeronCluster{
 		cfg:              cfg,
 		aeronClient:      ac,
 		state:            StateDisconnected,
 		sendBuf:          make([]byte, bufSize),
 		reconnectBackoff: cfg.ReconnectBackoffMs,
-	}, nil
+	}
+	return cluster, nil
 }
 
 func (c *AeronCluster) Connect() {
@@ -247,7 +267,10 @@ func (c *AeronCluster) createEgressSubscription() int {
 		return 0
 	}
 	c.egressSub = sub
-	c.egressFragments = NewFragmentAssembler(c.dispatchEgress).OnFragment
+	c.egressAssembler = NewFragmentAssembler(c.dispatchEgress)
+	c.egressFragments = c.egressAssembler.OnFragment
+	c.egressEndedN.Store(0)
+	sub.SetUnavailableImageHandler(c.onEgressImageUnavailable)
 	c.state = StateAwaitSubscriptionConnected
 	return 1
 }
@@ -371,9 +394,35 @@ func (c *AeronCluster) sendCloseRequest() {
 // the poll started in, not the state a message leaves behind, so a session
 // event that moves the state does not change how the rest of the batch is read.
 func (c *AeronCluster) pollEgress(stage ClusterState) {
+	if c.egressEndedN.Load() != 0 {
+		c.freeEndedEgressSessions()
+	}
 	c.egressWork = 0
 	c.egressStage = stage
 	c.egressSub.Poll(c.egressFragments, 10)
+}
+
+// onEgressImageUnavailable runs on the DoWork goroutine when an egress image
+// goes away (the leader changed, or its node stopped).
+func (c *AeronCluster) onEgressImageUnavailable(sessionID int32) {
+	c.egressEndedMu.Lock()
+	c.egressEnded = append(c.egressEnded, sessionID)
+	c.egressEndedN.Store(int32(len(c.egressEnded)))
+	c.egressEndedMu.Unlock()
+}
+
+// freeEndedEgressSessions drops the reassembly state of sessions that have
+// ended: a grown buffer, and possibly a half-built message that will never
+// finish.
+func (c *AeronCluster) freeEndedEgressSessions() {
+	c.egressEndedMu.Lock()
+	ended := c.egressEnded
+	c.egressEnded = nil
+	c.egressEndedN.Store(0)
+	c.egressEndedMu.Unlock()
+	for _, id := range ended {
+		c.egressAssembler.FreeSessionBuffer(id)
+	}
 }
 
 // dispatchEgress receives each reassembled egress message.

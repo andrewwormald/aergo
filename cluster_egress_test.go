@@ -40,7 +40,8 @@ func newEgressTestCluster(state ClusterState) (*AeronCluster, *Publication, *rec
 		egressSub:       sub,
 		lastKeepAliveMs: time.Now().UnixMilli(),
 	}
-	c.egressFragments = NewFragmentAssembler(c.dispatchEgress).OnFragment
+	c.egressAssembler = NewFragmentAssembler(c.dispatchEgress)
+	c.egressFragments = c.egressAssembler.OnFragment
 	return c, pub, l
 }
 

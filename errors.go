@@ -38,6 +38,13 @@ const (
 // publication, however long the caller retries.
 var ErrMessageTooLong = errors.New("message too long")
 
+// ErrCorruptFrame is matched (errors.Is) by the error reported to the error
+// handler when a subscription finds a frame it cannot read: a length shorter
+// than a frame header or longer than the rest of the term. The subscription
+// stops at that frame instead of skipping it, so nothing is silently lost and
+// the publisher is back pressured.
+var ErrCorruptFrame = errors.New("corrupt frame")
+
 // MessageTooLongError reports a message longer than the publication allows.
 // Mirrors the IllegalArgumentException Java's Publication.offer and tryClaim
 // throw ("message exceeds maxMessageLength", "claim exceeds

@@ -64,6 +64,17 @@ pos, err := cc.Offer([]byte("hello cluster"))
 
 The returned position is separate from the error. Back pressure and similar conditions are negative positions with a nil error, as in Java, so a retry loop stays cheap; the error is only for a message that cannot be sent however often you retry.
 
+### Errors with no caller to return to
+
+The library never logs. Errors found while the client works in the background (a driver rejection, a log that cannot be mapped, a corrupt frame, a driver timeout) go to a handler you supply, as with Java's `Aeron.Context.errorHandler`. For the cluster client they go to `EgressListener.OnError`.
+
+```go
+client, err := aergo.Connect(
+    aergo.WithDir("/dev/shm/aeron-user"),
+    aergo.WithErrorHandler(func(err error) { log.Printf("aeron: %v", err) }),
+)
+```
+
 ## Building the Media Driver
 
 `aergo` is a client -- it talks to a running `aeronmd` process via shared memory. The media driver itself is the upstream Aeron C/C++ build; this repo does not bundle a build script. Follow the upstream build instructions:

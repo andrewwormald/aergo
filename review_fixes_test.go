@@ -3,6 +3,7 @@ package aergo
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,6 +33,17 @@ func publicationReply(corrID int64, logFile string) []byte {
 	binary.LittleEndian.PutUint64(msg[8:], uint64(corrID))
 	binary.LittleEndian.PutUint32(msg[32:], uint32(len(logFile)))
 	copy(msg[36:], logFile)
+	return msg
+}
+
+// unavailableImageReply builds the driver's ON_UNAVAILABLE_IMAGE message in the
+// layout of Java's ImageMessageFlyweight: correlation ID, then the subscription
+// registration ID, then the stream ID and channel.
+func unavailableImageReply(imageCorrID, subRegID int64) []byte {
+	msg := make([]byte, 24)
+	binary.LittleEndian.PutUint64(msg[0:], uint64(imageCorrID))
+	binary.LittleEndian.PutUint64(msg[8:], uint64(subRegID))
+	binary.LittleEndian.PutUint32(msg[16:], 1001) // stream ID
 	return msg
 }
 
@@ -292,5 +304,192 @@ func TestClosedPublicationIsNotConnectedAfterItsLogIsUnmapped(t *testing.T) {
 
 	if p.IsConnected() {
 		t.Error("closed publication reports connected")
+	}
+}
+
+// The driver's ON_UNAVAILABLE_IMAGE names the subscription at offset 8 (Java's
+// ImageMessageFlyweight). It was read from offset 16, so no image was ever
+// matched and none was ever removed.
+func TestUnavailableImageIsRemovedAndReported(t *testing.T) {
+	logFile := writeLogFile(t, 64*1024)
+	c := newBareConductor()
+	const id = int64(7)
+	state := &subscriptionState{correlationID: id, ready: true}
+	c.subscriptions[id] = state
+	sub := newSubscription(c, id, state)
+	var ended []int32
+	sub.SetUnavailableImageHandler(func(session int32) { ended = append(ended, session) })
+
+	msg := imageReply(id, logFile)
+	binary.LittleEndian.PutUint32(msg[8:], 77) // session ID
+	binary.LittleEndian.PutUint64(msg[0:], 10) // image correlation ID
+	c.onAvailableImage(msg)
+	if len(state.images) != 1 {
+		t.Fatalf("setup: %d images", len(state.images))
+	}
+	lb := state.images[0].LogBuffers
+
+	c.onUnavailableImage(unavailableImageReply(10, id))
+
+	if len(state.images) != 0 || len(*state.snapshot.Load()) != 0 {
+		t.Errorf("image still present after the driver reported it unavailable")
+	}
+	if len(ended) != 1 || ended[0] != 77 {
+		t.Errorf("handler got sessions %v, want [77]", ended)
+	}
+	if lb.data == nil {
+		t.Error("log unmapped immediately; a poller may still be reading it")
+	}
+	c.reapLingering(time.Now().UnixNano() + resourceLingerNs + 1)
+	if lb.data != nil {
+		t.Error("log still mapped after the linger")
+	}
+
+	// A message for another subscription or image changes nothing.
+	c.onUnavailableImage(unavailableImageReply(10, 999))
+	if len(ended) != 1 {
+		t.Errorf("handler called for an unknown subscription: %v", ended)
+	}
+}
+
+func TestErrorHandlerReceivesErrorsAndTheRecordedListIsBounded(t *testing.T) {
+	c := newBareConductor()
+	var got []error
+	c.errorHandler = func(err error) { got = append(got, err) }
+
+	// A log that cannot be mapped used to vanish without a trace.
+	c.subscriptions[3] = &subscriptionState{correlationID: 3, ready: true}
+	c.onAvailableImage(imageReply(3, filepath.Join(t.TempDir(), "missing.logbuffer")))
+	if len(got) != 1 {
+		t.Fatalf("handler got %d errors for an unmappable image log, want 1", len(got))
+	}
+
+	for i := 0; i < 5*maxRecordedErrors; i++ {
+		c.reportError(errors.New("x"))
+	}
+	if len(c.errors) != maxRecordedErrors {
+		t.Errorf("%d errors kept, want the most recent %d", len(c.errors), maxRecordedErrors)
+	}
+
+	var viaOption Context
+	WithErrorHandler(func(error) {})(&viaOption)
+	if viaOption.ErrorHandler == nil {
+		t.Error("WithErrorHandler did not set the handler")
+	}
+}
+
+// A committed length no frame can have is not skipped: the subscription stops
+// there, delivers nothing more, and reports it once.
+func TestPollStopsAtACorruptFrameAndReportsItOnce(t *testing.T) {
+	for name, badLen := range map[string]int32{
+		"shorter than a header":    5,
+		"longer than the term":     64*1024 + 32,
+		"past the end of the term": 64*1024 - 64 + 96,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lb := newInMemLogBuffers(64 * 1024)
+			app := NewTermAppender(lb, 0)
+			app.Append(0, 1, 1001, []byte("good"))
+			// Commit a bad length where the next frame would start (offset 64).
+			lb.Term(0).PutInt32Ordered(64+FrameLengthOffset, badLen)
+
+			sub := newInMemSubscription(lb, 1001)
+			var errs []error
+			sub.conductor.errorHandler = func(err error) { errs = append(errs, err) }
+			img := sub.state.images[0]
+
+			var got []string
+			handler := func(b []byte, _ *Header) { got = append(got, string(b)) }
+			if n := sub.Poll(handler, 10); n != 1 {
+				t.Errorf("first Poll = %d, want the 1 good frame", n)
+			}
+			for i := 0; i < 5; i++ {
+				if n := sub.Poll(handler, 10); n != 0 {
+					t.Errorf("Poll read %d fragments past a corrupt frame", n)
+				}
+			}
+			if len(got) != 1 || got[0] != "good" {
+				t.Errorf("delivered %q", got)
+			}
+			if img.subscriberPosition != 64 {
+				t.Errorf("position = %d, want to stop at the corrupt frame (64)", img.subscriberPosition)
+			}
+			if len(errs) != 1 || !errors.Is(errs[0], ErrCorruptFrame) {
+				t.Errorf("reported %v, want exactly one ErrCorruptFrame", errs)
+			}
+		})
+	}
+}
+
+// A reassembled message is described by its header: the whole length, flagged
+// unfragmented, starting where the first fragment did (Java's FragmentAssembler).
+func TestReassembledMessageHeaderDescribesTheWholeMessage(t *testing.T) {
+	var got Header
+	var payload string
+	a := NewFragmentAssembler(func(b []byte, h *Header) { got, payload = *h, string(b) })
+	a.OnFragment([]byte("aa"), &Header{SessionID: 4, Flags: FlagBeginFrag, TermOffset: 64, FrameLength: 34, Position: 128})
+	a.OnFragment([]byte("bb"), &Header{SessionID: 4, Flags: 0, TermOffset: 96, FrameLength: 34, Position: 160})
+	a.OnFragment([]byte("c"), &Header{SessionID: 4, Flags: FlagEndFrag, TermOffset: 128, FrameLength: 33, Position: 192, StreamID: 9})
+
+	if payload != "aabbc" {
+		t.Fatalf("payload %q", payload)
+	}
+	if got.FrameLength != DataFrameHeaderLen+5 {
+		t.Errorf("FrameLength = %d, want %d", got.FrameLength, DataFrameHeaderLen+5)
+	}
+	if got.Flags != FlagUnfrag {
+		t.Errorf("Flags = %#x, want unfragmented", got.Flags)
+	}
+	if got.TermOffset != 64 {
+		t.Errorf("TermOffset = %d, want 64, where the message begins", got.TermOffset)
+	}
+	if got.Position != 192 || got.SessionID != 4 || got.StreamID != 9 {
+		t.Errorf("Position/SessionID/StreamID = %d/%d/%d", got.Position, got.SessionID, got.StreamID)
+	}
+}
+
+// When the egress image of a session goes away, its reassembly state goes too.
+func TestClusterFreesReassemblyStateOfAnEndedEgressSession(t *testing.T) {
+	c, _, _ := newEgressTestCluster(StateConnected)
+	c.egressSub.SetUnavailableImageHandler(c.onEgressImageUnavailable)
+
+	// Half a message from session 1, whose image is the subscription's only one.
+	c.egressAssembler.OnFragment(make([]byte, 100), &Header{SessionID: 1, Flags: FlagBeginFrag})
+	if len(c.egressAssembler.builders) != 1 {
+		t.Fatalf("setup: %d builders", len(c.egressAssembler.builders))
+	}
+
+	c.egressSub.conductor.onUnavailableImage(unavailableImageReply(0, c.egressSub.registrationID))
+	c.pollEgress(StateConnected) // frees on the polling goroutine
+
+	if len(c.egressAssembler.builders) != 0 {
+		t.Errorf("%d builders left for a session that ended", len(c.egressAssembler.builders))
+	}
+}
+
+// Closing a publication drops its state; the map used to grow with every
+// publication ever added.
+func TestPublicationCloseForgetsItsState(t *testing.T) {
+	logFile := writeLogFile(t, 64*1024)
+	c := newBareConductor()
+	c.proxy = NewDriverProxy(newTestRingBuffer(4096), 1)
+	lb, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &publicationState{correlationID: 9, registrationID: 9, logBuffers: lb}
+	c.publications[9] = st
+	p := &Publication{conductor: c, state: st, logBuffers: lb, registrationID: 9}
+
+	p.Close()
+	if len(c.publications) != 0 {
+		t.Errorf("%d publication states left after Close", len(c.publications))
+	}
+	if len(c.lingering) != 1 {
+		t.Errorf("log not queued for release: %d lingering", len(c.lingering))
+	}
+	p.Close() // idempotent
+	if len(c.lingering) != 1 {
+		t.Errorf("second Close queued another release: %d lingering", len(c.lingering))
 	}
 }

@@ -39,6 +39,15 @@ func WithDir(dir string) ContextOption {
 	return func(ctx *Context) { ctx.AeronDir = dir }
 }
 
+// WithErrorHandler sets a function called with errors the client finds but has
+// no caller to return to: a driver rejection, a log that cannot be mapped, a
+// corrupt frame, a driver or client timeout. It mirrors Java's
+// Aeron.Context.errorHandler. The library never logs by itself; without a
+// handler these errors are only kept (the most recent few) and not visible.
+func WithErrorHandler(fn func(error)) ContextOption {
+	return func(ctx *Context) { ctx.ErrorHandler = fn }
+}
+
 // NewClient creates a new Aeron client connected to the media driver.
 func Connect(opts ...ContextOption) (*Aeron, error) {
 	cfg := DefaultContext()

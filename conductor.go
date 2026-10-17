@@ -51,9 +51,13 @@ type Conductor struct {
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
-	errors        []error
+	errors        []error // the most recent maxRecordedErrors
+	errorHandler  func(error)
 	fatalErr      error
 }
+
+// maxRecordedErrors bounds the conductor's list of recent errors.
+const maxRecordedErrors = 64
 
 // resourceLingerNs is how long a released log stays mapped (Java's
 // RESOURCE_LINGER_DURATION_DEFAULT_NS).
@@ -96,6 +100,10 @@ type subscriptionState struct {
 	// the pending AddSubscription call fails with it.
 	err error
 
+	// onUnavailable, if set, is told the session ID of each image that goes
+	// away. Guarded by Conductor.mu.
+	onUnavailable func(sessionID int32)
+
 	// snapshot is an immutable copy of images that Subscription.Poll reads
 	// without taking any lock, as Java's Subscription reads its volatile
 	// image array. It is replaced, never modified, whenever images changes.
@@ -120,6 +128,10 @@ type Image struct {
 	SourceIdentity     string
 	subscriberPosition int64 // current read position (internal)
 
+	// corruptReported is the position (plus one) of the corrupt frame already
+	// reported to the error handler, so a stalled subscriber reports it once.
+	corruptReported int64
+
 	// counterValues is the driver's counter values buffer. The subscriber
 	// position counter at SubscriberPos must be updated on every position
 	// advance so the driver's flow control sees this subscriber consuming;
@@ -143,6 +155,11 @@ type Context struct {
 	AeronDir         string
 	DriverTimeoutMs  int64
 	KeepaliveInterMs int64
+
+	// ErrorHandler, if set, is called with errors the client finds but has no
+	// caller to return to: a driver rejection, a log that cannot be mapped, a
+	// corrupt frame, a driver or client timeout. See WithErrorHandler.
+	ErrorHandler func(error)
 }
 
 // DefaultContext returns sensible defaults.
@@ -180,6 +197,7 @@ func NewConductor(cfg Context) (*Conductor, error) {
 		driverTimeoutNs:    cfg.DriverTimeoutMs * 1_000_000,
 		keepaliveInterNs:   cfg.KeepaliveInterMs * 1_000_000,
 		heartbeatCounterId: -1,
+		errorHandler:       cfg.ErrorHandler,
 		publications:       make(map[int64]*publicationState),
 		subscriptions:      make(map[int64]*subscriptionState),
 	}
@@ -393,6 +411,31 @@ func (c *Conductor) onClientTimeout(msg []byte) {
 	c.terminate(&ClientTimeoutError{})
 }
 
+// addErrorLocked records err, keeping only the most recent ones. The caller
+// holds c.mu.
+func (c *Conductor) addErrorLocked(err error) {
+	if len(c.errors) >= maxRecordedErrors {
+		copy(c.errors, c.errors[1:])
+		c.errors = c.errors[:len(c.errors)-1]
+	}
+	c.errors = append(c.errors, err)
+}
+
+// reportError records err and passes it to the error handler, if there is one
+// (WithErrorHandler; Java's Aeron.Context.errorHandler). The library never logs
+// by itself. The handler runs on the goroutine that found the error, with no
+// lock held, so it may be slow but must not call back into the same client in
+// a way that waits on that goroutine.
+func (c *Conductor) reportError(err error) {
+	c.mu.Lock()
+	c.addErrorLocked(err)
+	h := c.errorHandler
+	c.mu.Unlock()
+	if h != nil {
+		h(err)
+	}
+}
+
 // terminate marks the conductor closed-equivalent with the fatal error that
 // caused it. The first terminal error wins; later calls are no-ops.
 func (c *Conductor) terminate(err error) {
@@ -401,8 +444,12 @@ func (c *Conductor) terminate(err error) {
 	}
 	c.mu.Lock()
 	c.fatalErr = err
-	c.errors = append(c.errors, err)
+	c.addErrorLocked(err)
+	h := c.errorHandler
 	c.mu.Unlock()
+	if h != nil {
+		h(err)
+	}
 }
 
 // isTerminated reports whether the conductor is closed-equivalent.
@@ -499,6 +546,19 @@ func (c *Conductor) lingerLog(lb *LogBuffers) {
 	c.logsMu.Lock()
 	c.lingering = append(c.lingering, lingeringLog{lb: lb, deadlineNs: time.Now().UnixNano() + resourceLingerNs})
 	c.logsMu.Unlock()
+}
+
+// forgetPublication drops the state of a closed publication. Without this the
+// map grows by one entry for every publication ever added.
+func (c *Conductor) forgetPublication(st *publicationState) {
+	if st == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.publications[st.correlationID] == st {
+		delete(c.publications, st.correlationID)
+	}
+	c.mu.Unlock()
 }
 
 // lingerPublicationLog gives up a publication's reference to its log, once.
@@ -654,6 +714,9 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 
 	lb, err := c.acquireLog(logFile)
 	if err != nil {
+		// Without the log the image cannot be read, and the subscription would
+		// silently never see this publication.
+		c.reportError(fmt.Errorf("map log buffers %s for subscription %d: %w", logFile, subRegID, err))
 		return
 	}
 
@@ -704,13 +767,23 @@ func (c *Conductor) releaseSubscription(registrationID int64) {
 	}
 }
 
+// onUnavailableImage handles RespOnUnavailableImage: the driver has dropped an
+// image (its publication went away). Message layout
+// (io.aeron.command.ImageMessageFlyweight):
+//
+//	offset 0:  correlationID                int64  (the image)
+//	offset 8:  subscriptionRegistrationID   int64
+//	offset 16: streamID                     int32
+//	offset 20: channel length + channel
 func (c *Conductor) onUnavailableImage(msg []byte) {
-	if len(msg) < 24 {
+	if len(msg) < 20 {
 		return
 	}
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
-	subRegID := int64(binary.LittleEndian.Uint64(msg[16:]))
+	subRegID := int64(binary.LittleEndian.Uint64(msg[8:]))
 
+	var handler func(sessionID int32)
+	var sessionID int32
 	c.mu.Lock()
 	sub := c.subscriptions[subRegID]
 	if sub != nil {
@@ -719,11 +792,16 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 				c.lingerLog(img.LogBuffers)
 				sub.images = append(sub.images[:i], sub.images[i+1:]...)
 				sub.publishImages()
+				handler, sessionID = sub.onUnavailable, img.SessionID
 				break
 			}
 		}
 	}
 	c.mu.Unlock()
+
+	if handler != nil {
+		handler(sessionID)
+	}
 }
 
 // onError handles RespOnError: the driver rejected a command. The error is
@@ -758,6 +836,10 @@ func (c *Conductor) onError(msg []byte) {
 	if sub := c.subscriptions[corrID]; sub != nil {
 		sub.err = err
 	}
-	c.errors = append(c.errors, err)
+	c.addErrorLocked(err)
+	h := c.errorHandler
 	c.mu.Unlock()
+	if h != nil {
+		h(err)
+	}
 }

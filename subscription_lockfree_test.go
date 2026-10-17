@@ -1,7 +1,6 @@
 package aergo
 
 import (
-	"encoding/binary"
 	"testing"
 	"time"
 )
@@ -41,10 +40,7 @@ func TestPollStopsReadingAnImageOnceUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msg := make([]byte, 24)
-	binary.LittleEndian.PutUint64(msg[0:], 0) // the image's correlation ID
-	binary.LittleEndian.PutUint64(msg[16:], uint64(sub.registrationID))
-	sub.conductor.onUnavailableImage(msg)
+	sub.conductor.onUnavailableImage(unavailableImageReply(0, sub.registrationID)) // the image's correlation ID is 0
 
 	if n := sub.Poll(func([]byte, *Header) {}, 10); n != 0 {
 		t.Errorf("Poll read %d fragments from a removed image", n)

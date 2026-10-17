@@ -171,12 +171,7 @@ func TestOnUnavailableImage(t *testing.T) {
 		},
 	}
 
-	msg := make([]byte, 24)
-	binary.LittleEndian.PutUint64(msg[0:], uint64(10)) // correlationID of image
-	binary.LittleEndian.PutUint64(msg[8:], uint64(0))
-	binary.LittleEndian.PutUint64(msg[16:], uint64(subRegID))
-
-	c.onUnavailableImage(msg)
+	c.onUnavailableImage(unavailableImageReply(10, subRegID))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

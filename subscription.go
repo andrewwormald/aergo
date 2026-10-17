@@ -1,6 +1,9 @@
 package aergo
 
-import "sync/atomic"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
 // Header contains parsed information from a received message frame.
 type Header struct {
@@ -107,6 +110,18 @@ func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int)
 		if frameLen <= 0 {
 			break // no more committed frames
 		}
+		if frameLen < DataFrameHeaderLen || int64(offset)+int64(frameLen) > int64(capacity) {
+			// A committed length no frame can have. Skipping it would lose
+			// whatever it covers without a trace and probably misread what
+			// follows, so stop here (the publisher is back pressured, as
+			// for any reader that stops) and say so, once per frame.
+			if at := termStart + int64(offset); img.corruptReported != at+1 {
+				img.corruptReported = at + 1
+				s.conductor.reportError(fmt.Errorf("%w: length %d at position %d (session %d, stream %d)",
+					ErrCorruptFrame, frameLen, at, img.SessionID, s.streamID))
+			}
+			break
+		}
 		aligned := align(frameLen, DataFrameHeaderLen)
 
 		if term.GetInt16(offset+FrameTypeOffset) != FrameTypePadding {
@@ -114,20 +129,17 @@ func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int)
 			// FragmentHandler does, so the payload is not copied unless the
 			// handler copies it. The header is reused across fragments. Both
 			// are valid only for the duration of the call.
-			length := frameLen - DataFrameHeaderLen
-			if length >= 0 && int64(offset)+int64(frameLen) <= int64(capacity) {
-				s.headerScratch = Header{
-					FrameLength:   frameLen,
-					Flags:         term.GetUint8(offset + FrameFlagsOffset),
-					SessionID:     term.GetInt32(offset + FrameSessionIDOff),
-					StreamID:      term.GetInt32(offset + FrameStreamIDOff),
-					TermID:        term.GetInt32(offset + FrameTermIDOff),
-					TermOffset:    term.GetInt32(offset + FrameTermOffsetOff),
-					ReservedValue: term.GetInt64(offset + FrameReservedValueOff),
-					Position:      termStart + int64(offset) + int64(aligned),
-				}
-				handler(term.Slice(offset+DataFrameHeaderLen, length), &s.headerScratch)
+			s.headerScratch = Header{
+				FrameLength:   frameLen,
+				Flags:         term.GetUint8(offset + FrameFlagsOffset),
+				SessionID:     term.GetInt32(offset + FrameSessionIDOff),
+				StreamID:      term.GetInt32(offset + FrameStreamIDOff),
+				TermID:        term.GetInt32(offset + FrameTermIDOff),
+				TermOffset:    term.GetInt32(offset + FrameTermOffsetOff),
+				ReservedValue: term.GetInt64(offset + FrameReservedValueOff),
+				Position:      termStart + int64(offset) + int64(aligned),
 			}
+			handler(term.Slice(offset+DataFrameHeaderLen, frameLen-DataFrameHeaderLen), &s.headerScratch)
 			fragments++
 		}
 
@@ -143,6 +155,17 @@ func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int)
 	}
 
 	return fragments
+}
+
+// SetUnavailableImageHandler registers fn to be called with the session ID of
+// each image of this subscription that goes away, because its publication
+// closed (Java's UnavailableImageHandler). It is called on the goroutine that
+// runs the client's DoWork, not the one that polls, so it must hand the session
+// over rather than touch state the poller owns.
+func (s *Subscription) SetUnavailableImageHandler(fn func(sessionID int32)) {
+	s.conductor.mu.Lock()
+	s.state.onUnavailable = fn
+	s.conductor.mu.Unlock()
 }
 
 // StreamID returns the stream identifier.

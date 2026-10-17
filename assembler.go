@@ -16,12 +16,16 @@ type FragmentAssembler struct {
 	// skips the map lookup on every fragment.
 	lastSession int32
 	last        *messageBuilder
+
+	// assembled is the header handed to the delegate for a reassembled message.
+	assembled Header
 }
 
 // messageBuilder accumulates the fragments of one in-flight message.
 type messageBuilder struct {
-	buf    []byte
-	active bool // a begin fragment has been seen and no end fragment yet
+	buf             []byte
+	active          bool  // a begin fragment has been seen and no end fragment yet
+	beginTermOffset int32 // where the message starts in the term
 }
 
 // NewFragmentAssembler wraps a handler with fragment reassembly.
@@ -75,6 +79,7 @@ func (a *FragmentAssembler) OnFragment(buffer []byte, header *Header) {
 		b := a.builder(header.SessionID, true)
 		b.buf = append(b.buf[:0], buffer...)
 		b.active = true
+		b.beginTermOffset = header.TermOffset
 		return
 	}
 
@@ -88,6 +93,13 @@ func (a *FragmentAssembler) OnFragment(buffer []byte, header *Header) {
 	if flags&FlagEndFrag == FlagEndFrag {
 		// Final fragment -- deliver complete message
 		b.active = false
-		a.delegate(b.buf, header)
+		// The header describes the message, not its last fragment, as in Java's
+		// FragmentAssembler: the whole length, flagged unfragmented, starting where
+		// the first fragment did. The position is that of the end of the message.
+		a.assembled = *header
+		a.assembled.FrameLength = int32(DataFrameHeaderLen + len(b.buf))
+		a.assembled.Flags = FlagUnfrag
+		a.assembled.TermOffset = b.beginTermOffset
+		a.delegate(b.buf, &a.assembled)
 	}
 }
