@@ -3,7 +3,8 @@
 #
 # Starts one Java media driver, then runs the Java and Go harnesses against it
 # in alternating rounds so machine drift does not favour whichever runs first.
-# Both clients are pinned to the same cores, the driver to others.
+# Both clients are pinned to the same cores, the driver to others, and each mode
+# and size runs in a fresh process.
 #
 #   bench/compare/run.sh                 full run
 #   QUICK=1 bench/compare/run.sh         small counts, to check the setup
@@ -26,10 +27,10 @@ work="$(mktemp -d)"
 dir="/dev/shm/aeron-compare-$$"
 
 if [[ -n "${QUICK:-}" ]]; then
-  args=(-count=200000 -repeats=1 -latcount=20000 -latwarmup=5000 -sizes="$sizes")
+  args=(-count=200000 -repeats=1 -latcount=20000 -latwarmup=5000)
   rounds=1
 else
-  args=(-sizes="$sizes")
+  args=()
 fi
 
 jar="${AERON_JAR:-$here/.cache/aeron-all-$version.jar}"
@@ -78,7 +79,7 @@ for _ in $(seq 100); do [[ -f "$dir/cnc.dat" ]] && break; sleep 0.1; done
   echo "# java:    $(java -version 2>&1 | grep -v 'Picked up' | head -1), aeron-all $version (driver and Java client)"
   echo "# go:      $(go version), aergo $(git -C "$root" rev-parse --short HEAD)"
   echo "# driver:  threading=DEDICATED cpus=${driver_pin[*]:-unpinned}; clients cpus=${client_pin[*]:-unpinned}"
-  echo "# args:    ${args[*]} rounds=$rounds"
+  echo "# args:    ${args[*]} sizes=$sizes rounds=$rounds"
   runners=(java go)
   for extra in ${EXTRA_GO:-}; do runners+=("$extra"); done
   for r in $(seq "$rounds"); do
@@ -87,11 +88,17 @@ for _ in $(seq 100); do [[ -f "$dir/cnc.dat" ]] && break; sleep 0.1; done
     for k in $(seq 0 $((${#runners[@]} - 1))); do
       who="${runners[$(((k + r - 1) % ${#runners[@]}))]}"
       echo "# round $r: $who"
-      case "$who" in
-        java) "${client_pin[@]}" java "${jvm[@]}" -cp "$jar:$work/classes" Bench -dir="$dir" "${args[@]}" 2>&1 | grep -v 'Picked up' ;;
-        go) "${client_pin[@]}" "$work/gobench" -dir="$dir" "${args[@]}" 2>&1 ;;
-        *) "${client_pin[@]}" "$who" -dir="$dir" "${args[@]}" 2>&1 ;;
-      esac | sed "s/^RESULT /RESULT round=$r /"
+      # Each mode and size gets a fresh process, so no phase can leave state
+      # (mappings, heap, scheduler history) behind for the next one.
+      for mode in throughput latency; do
+        for size in ${sizes//,/ }; do
+          case "$who" in
+            java) "${client_pin[@]}" java "${jvm[@]}" -cp "$jar:$work/classes" Bench -dir="$dir" -mode=$mode -sizes=$size "${args[@]}" 2>&1 | grep -v 'Picked up' ;;
+            go) "${client_pin[@]}" "$work/gobench" -dir="$dir" -mode=$mode -sizes=$size "${args[@]}" 2>&1 ;;
+            *) "${client_pin[@]}" "$who" -dir="$dir" -mode=$mode -sizes=$size "${args[@]}" 2>&1 ;;
+          esac
+        done
+      done | sed "s/^RESULT /RESULT round=$r /"
     done
   done
 } | tee "$out"

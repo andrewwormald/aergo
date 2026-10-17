@@ -40,6 +40,7 @@ func main() {
 	latWarmup := flag.Int("latwarmup", 50000, "latency warm-up round trips")
 	idle := flag.String("idle", "spin", "throughput consumer idle strategy: spin or backoff (Agrona defaults)")
 	pin := flag.String("pin", "", "CPUs for the two busy threads: producer,consumer (pinger,ponger)")
+	conductorMs := flag.Int("conductor-ms", 16, "DoWork interval; Java's client conductor sleeps 16 ms between duty cycles")
 	conductor := flag.Bool("conductor", true, "run DoWork on a background goroutine")
 	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	flag.Parse()
@@ -51,6 +52,7 @@ func main() {
 	}
 
 	parsePin(*pin)
+	conductorInterval = time.Duration(*conductorMs) * time.Millisecond
 	consumerIdle = *idle
 
 	var sizes []int
@@ -85,14 +87,15 @@ func main() {
 }
 
 // startConductor runs the client's DoWork in the background, standing in for
-// the conductor thread Java's client runs on its own. The Go client has none:
-// DoWork must be called to answer the driver and send keepalives.
+// the conductor thread Java's client runs on its own, which sleeps 16 ms
+// between duty cycles by default. The Go client has none: DoWork must be called
+// to answer the driver and send keepalives.
 func startConductor(client *aergo.Aeron) (stop func()) {
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(time.Millisecond)
+		t := time.NewTicker(conductorInterval)
 		defer t.Stop()
 		for {
 			select {
@@ -107,6 +110,7 @@ func startConductor(client *aergo.Aeron) (stop func()) {
 }
 
 var (
+	conductorInterval        = 16 * time.Millisecond
 	pinProducer, pinConsumer = -1, -1
 	consumerIdle             = "spin"
 )
@@ -238,12 +242,17 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	var stop atomic.Bool
 	echo := aergo.NewFragmentAssembler(func(b []byte, _ *aergo.Header) { offer(pong, b) })
 	ponged := make(chan struct{})
+	var pongerSwitches int64
 	go func() {
 		runtime.LockOSThread()
 		pinThread(pinConsumer)
+		var r0, r1 syscall.Rusage
+		_ = syscall.Getrusage(1, &r0) // RUSAGE_THREAD
 		for !stop.Load() {
 			pingSub.Poll(echo.OnFragment, fragmentLimit)
 		}
+		_ = syscall.Getrusage(1, &r1)
+		pongerSwitches = r1.Nivcsw - r0.Nivcsw
 		close(ponged)
 	}()
 
@@ -251,9 +260,13 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	pinThread(pinProducer)
 	var ru0 syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
+	var th0, th1 syscall.Rusage
+	_ = syscall.Getrusage(1, &th0) // RUSAGE_THREAD: the pinger
 	got := 0
 	reply := aergo.NewFragmentAssembler(func([]byte, *aergo.Header) { got++ })
 	samples := make([]int64, count)
+	starts := make([]int64, count)
+	base := time.Now()
 	for i := 0; i < warmup+count; i++ {
 		got = 0
 		t0 := time.Now()
@@ -264,6 +277,7 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 		rtt := time.Since(t0).Nanoseconds()
 		if i >= warmup {
 			samples[i-warmup] = rtt
+			starts[i-warmup] = t0.Sub(base).Nanoseconds()
 		}
 	}
 	stop.Store(true)
@@ -271,6 +285,12 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 
 	var ru1 syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
+	_ = syscall.Getrusage(1, &th1)
+	if os.Getenv("TAIL") != "" {
+		<-ponged
+		fmt.Fprintf(os.Stderr, "SWITCHES involuntary: pinger %d, ponger %d\n", th1.Nivcsw-th0.Nivcsw, pongerSwitches)
+		reportSlow(samples, starts)
+	}
 	sort.Slice(samples, func(a, b int) bool { return samples[a] < samples[b] })
 	pct := func(p float64) int64 {
 		idx := int(p*float64(len(samples))+0.999999999) - 1
@@ -330,5 +350,43 @@ func burst(client *aergo.Aeron, size, repeats int) {
 			fmt.Printf("RESULT lang=go mode=burst size=%d run=%d msgs=%d publish_msgs_per_sec=%.0f drain_msgs_per_sec=%.0f publish_minflt=%d\n",
 				size, run, n, float64(n)/pubSecs, float64(n)/drainSecs, ru1.Minflt-ru0.Minflt)
 		}
+	}
+}
+
+// reportSlow groups round trips slower than 20us that start within 5ms of each
+// other, to tell a few long stalls from steady background noise.
+func reportSlow(samples, starts []int64) {
+	type burst struct {
+		startMs float64
+		n       int
+		worstUs float64
+		totalUs float64
+	}
+	var bursts []burst
+	var slow int
+	last := int64(-1 << 62)
+	for i, v := range samples {
+		if v < 20_000 {
+			continue
+		}
+		slow++
+		if starts[i]-last > 5_000_000 {
+			bursts = append(bursts, burst{startMs: float64(starts[i]) / 1e6})
+		}
+		b := &bursts[len(bursts)-1]
+		b.n++
+		b.totalUs += float64(v) / 1e3
+		if float64(v)/1e3 > b.worstUs {
+			b.worstUs = float64(v) / 1e3
+		}
+		last = starts[i]
+	}
+	fmt.Fprintf(os.Stderr, "SLOW size samples>20us: %d of %d in %d clusters\n", slow, len(samples), len(bursts))
+	for i, b := range bursts {
+		if i >= 12 {
+			fmt.Fprintf(os.Stderr, "  ... %d more\n", len(bursts)-i)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  at %8.1f ms: %5d slow round trips, worst %8.0f us, together %7.1f ms\n", b.startMs, b.n, b.worstUs, b.totalUs/1000)
 	}
 }
