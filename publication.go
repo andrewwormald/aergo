@@ -12,6 +12,7 @@ import (
 // Publication wraps a log buffer for sending messages to a stream.
 type Publication struct {
 	conductor      *Conductor
+	state          *publicationState
 	channel        string
 	streamID       int32
 	sessionID      int32
@@ -36,6 +37,7 @@ type Publication struct {
 func newPublication(conductor *Conductor, state *publicationState) *Publication {
 	p := &Publication{
 		conductor:         conductor,
+		state:             state,
 		channel:           state.channel,
 		streamID:          state.streamID,
 		sessionID:         state.sessionID,
@@ -452,6 +454,7 @@ func (p *Publication) Close() {
 		// A loopback publication has no driver to tell.
 		if p.conductor != nil && p.conductor.proxy != nil {
 			p.conductor.proxy.RemovePublication(p.registrationID)
+			p.conductor.lingerPublicationLog(p.state)
 		}
 	}
 }

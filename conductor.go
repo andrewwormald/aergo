@@ -42,11 +42,26 @@ type Conductor struct {
 	logsMu sync.Mutex
 	logs   map[string]*LogBuffers
 
+	// lingering holds references that are no longer wanted but are kept for
+	// resourceLingerNs first: a goroutine may still be offering to a closed
+	// publication or polling an image that has just gone, and unmapping the log
+	// under it would fault (Java lingers its resources the same way).
+	lingering []lingeringLog
+
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
 	errors        []error
 	fatalErr      error
+}
+
+// resourceLingerNs is how long a released log stays mapped (Java's
+// RESOURCE_LINGER_DURATION_DEFAULT_NS).
+const resourceLingerNs = 3_000_000_000
+
+type lingeringLog struct {
+	lb         *LogBuffers
+	deadlineNs int64
 }
 
 type publicationState struct {
@@ -63,6 +78,11 @@ type publicationState struct {
 	// err records the driver's rejection (RespOnError) of the add command so
 	// the pending AddPublication/AddExclusivePublication call fails with it.
 	err error
+
+	// logReleased is set by whoever gives up this state's reference to its log
+	// (Publication.Close, or Conductor.Close if it never was), so it is
+	// released exactly once.
+	logReleased atomic.Bool
 }
 
 type subscriptionState struct {
@@ -186,7 +206,7 @@ func (c *Conductor) Close() error {
 	defer c.mu.Unlock()
 
 	for _, pub := range c.publications {
-		if pub.logBuffers != nil {
+		if pub.logBuffers != nil && pub.logReleased.CompareAndSwap(false, true) {
 			c.releaseLog(pub.logBuffers)
 		}
 	}
@@ -197,6 +217,8 @@ func (c *Conductor) Close() error {
 			}
 		}
 	}
+
+	c.reapLingering(1<<62 - 1) // nothing lingers past Close
 
 	return c.cnc.Close()
 }
@@ -314,6 +336,7 @@ func (c *Conductor) DoWork() int {
 		}
 
 		c.proxy.SendClientKeepalive()
+		c.reapLingering(now)
 
 		if c.heartbeatCounterId < 0 {
 			c.heartbeatCounterId = FindHeartbeatCounter(
@@ -454,6 +477,10 @@ func (c *Conductor) releaseLog(lb *LogBuffers) {
 	}
 	c.logsMu.Lock()
 	defer c.logsMu.Unlock()
+	c.releaseLogLocked(lb)
+}
+
+func (c *Conductor) releaseLogLocked(lb *LogBuffers) {
 	if lb.path != "" && c.logs[lb.path] == lb {
 		if lb.refs--; lb.refs > 0 {
 			return
@@ -461,6 +488,42 @@ func (c *Conductor) releaseLog(lb *LogBuffers) {
 		delete(c.logs, lb.path)
 	}
 	lb.Close()
+}
+
+// lingerLog gives up a reference, but only really releases it after
+// resourceLingerNs.
+func (c *Conductor) lingerLog(lb *LogBuffers) {
+	if lb == nil {
+		return
+	}
+	c.logsMu.Lock()
+	c.lingering = append(c.lingering, lingeringLog{lb: lb, deadlineNs: time.Now().UnixNano() + resourceLingerNs})
+	c.logsMu.Unlock()
+}
+
+// lingerPublicationLog gives up a publication's reference to its log, once.
+func (c *Conductor) lingerPublicationLog(st *publicationState) {
+	if st != nil && st.logBuffers != nil && st.logReleased.CompareAndSwap(false, true) {
+		c.lingerLog(st.logBuffers)
+	}
+}
+
+// reapLingering releases the references whose linger has run out.
+func (c *Conductor) reapLingering(nowNs int64) {
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	kept := c.lingering[:0]
+	for _, l := range c.lingering {
+		if nowNs >= l.deadlineNs {
+			c.releaseLogLocked(l.lb)
+		} else {
+			kept = append(kept, l)
+		}
+	}
+	for i := len(kept); i < len(c.lingering); i++ {
+		c.lingering[i] = lingeringLog{}
+	}
+	c.lingering = kept
 }
 
 func (c *Conductor) onNewPublication(msg []byte) {
@@ -618,7 +681,7 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 	if sub != nil {
 		for i, img := range sub.images {
 			if img.CorrelationID == corrID {
-				c.releaseLog(img.LogBuffers)
+				c.lingerLog(img.LogBuffers)
 				sub.images = append(sub.images[:i], sub.images[i+1:]...)
 				sub.publishImages()
 				break

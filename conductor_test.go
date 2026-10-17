@@ -674,3 +674,61 @@ func TestLogBuffersAreSharedAndReferenceCounted(t *testing.T) {
 	}
 	c.releaseLog(d)
 }
+
+// A log whose reference is given up stays mapped for the linger period, so a
+// goroutine still using it does not fault, and is unmapped after.
+func TestLingeringLogIsUnmappedOnlyAfterTheLinger(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "linger.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+	lb, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.lingerLog(lb)
+	c.reapLingering(time.Now().UnixNano())
+	if lb.data == nil {
+		t.Fatal("log unmapped before its linger ran out")
+	}
+	// Still usable.
+	_ = lb.Term(0).GetInt32(0)
+
+	c.reapLingering(time.Now().UnixNano() + resourceLingerNs + 1)
+	if lb.data != nil {
+		t.Error("log still mapped after its linger ran out")
+	}
+	if len(c.lingering) != 0 {
+		t.Errorf("%d entries still lingering", len(c.lingering))
+	}
+}
+
+// Closing a publication gives up its reference once; closing the conductor
+// afterwards must not release it again.
+func TestPublicationCloseReleasesItsLogOnce(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "pub.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+	lb, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := c.acquireLog(logFile) // e.g. the image of a subscription on the same stream
+	st := &publicationState{logBuffers: lb}
+
+	c.lingerPublicationLog(st)
+	c.lingerPublicationLog(st) // a second Close or Conductor.Close must be a no-op
+	c.reapLingering(time.Now().UnixNano() + resourceLingerNs + 1)
+
+	if lb.data == nil {
+		t.Fatal("log unmapped while the image still held it: the publication released twice")
+	}
+	c.releaseLog(other)
+	if lb.data != nil {
+		t.Error("log still mapped after both references were released")
+	}
+}
