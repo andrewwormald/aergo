@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,7 +36,14 @@ func main() {
 	repeats := flag.Int("repeats", 5, "measured throughput runs per size")
 	latCount := flag.Int("latcount", 200000, "latency samples")
 	latWarmup := flag.Int("latwarmup", 50000, "latency warm-up round trips")
+	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	flag.Parse()
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		check(err)
+		check(pprof.StartCPUProfile(f))
+		defer pprof.StopCPUProfile()
+	}
 
 	var sizes []int
 	for _, s := range strings.Split(*sizesArg, ",") {
