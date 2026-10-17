@@ -99,7 +99,7 @@ func (p *Publication) MaxMessageLength() int { return int(p.maxMessageLength) }
 // retries or reacts to, so they are not errors; the error is for a message
 // that can never be sent.
 func (p *Publication) Offer(buf []byte) (int64, error) {
-	if len(buf) > int(p.maxPayloadLength) {
+	if p.maxPayloadLength > 0 && len(buf) > int(p.maxPayloadLength) {
 		return p.offerFragmented(buf, nil)
 	}
 
@@ -120,7 +120,7 @@ func (p *Publication) Offer(buf []byte) (int64, error) {
 // copy. Results and errors are as for Offer.
 func (p *Publication) OfferParts(first, second []byte) (int64, error) {
 	length := len(first) + len(second)
-	if length > int(p.maxPayloadLength) {
+	if p.maxPayloadLength > 0 && length > int(p.maxPayloadLength) {
 		return p.offerFragmented(first, second)
 	}
 
@@ -211,7 +211,7 @@ func (p *Publication) TryClaim(length int) (BufferClaim, int64, error) {
 	if length < 0 {
 		return BufferClaim{}, 0, fmt.Errorf("invalid length: %d", length)
 	}
-	if length > int(p.maxPayloadLength) {
+	if p.maxPayloadLength > 0 && length > int(p.maxPayloadLength) {
 		return BufferClaim{}, 0, &MessageTooLongError{Length: length, Max: int(p.maxPayloadLength), Claim: true}
 	}
 
@@ -306,8 +306,11 @@ func (p *Publication) claimSpace(alignedLen int32) (*AtomicBuffer, int32, int32,
 // packed as they lie in memory. The reserved value is left as the driver
 // zeroed it.
 func (p *Publication) putFrameHeader(term *AtomicBuffer, offset, termID int32, flags byte) {
-	// bytes 0..7: frame length (0), version (0), flags, type
-	term.PutInt64(offset+FrameLengthOffset, int64(flags)<<(8*FrameFlagsOffset)|int64(FrameTypeData)<<(8*FrameTypeOffset))
+	// bytes 0..7: frame length (0), version (0), flags, type. This word holds
+	// the frame length a subscriber polls with an atomic load, so it is stored
+	// with release semantics, as Java's HeaderWriter does; a plain store would
+	// be a data race with that load.
+	term.PutInt64Ordered(offset+FrameLengthOffset, int64(flags)<<(8*FrameFlagsOffset)|int64(FrameTypeData)<<(8*FrameTypeOffset))
 	// bytes 8..15: term offset, session ID
 	term.PutInt64(offset+FrameTermOffsetOff, int64(uint32(offset))|int64(uint32(p.sessionID))<<32)
 	// bytes 16..23: stream ID, term ID
@@ -343,7 +346,7 @@ func (c BufferClaim) Commit() {
 // subscribers skip over it. Use when the caller decides not to publish
 // after already claiming space (e.g. an error building the message).
 func (c BufferClaim) Abort() {
-	c.term.PutInt32(c.offset+FrameTypeOffset, FrameTypePadding)
+	c.term.PutInt16(c.offset+FrameTypeOffset, FrameTypePadding)
 	c.term.PutInt32Ordered(c.offset+FrameLengthOffset, DataFrameHeaderLen+c.length)
 }
 
@@ -383,10 +386,10 @@ func (p *Publication) backPressureStatus(currentPosition int64, alignedFrameLen,
 func (p *Publication) handleEndOfLog(term *AtomicBuffer, termLen, termID, termOffset int32, position int64) int64 {
 	if termOffset < termLen {
 		paddingLen := termLen - termOffset
-		term.PutInt32(termOffset+FrameLengthOffset, 0)
+		term.PutInt32Ordered(termOffset+FrameLengthOffset, 0) // read atomically by Poll
 		term.PutUint8(termOffset+FrameVersionOffset, 0)
 		term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
-		term.PutInt32(termOffset+FrameTypeOffset, FrameTypePadding)
+		term.PutInt16(termOffset+FrameTypeOffset, FrameTypePadding)
 		term.PutInt32(termOffset+FrameTermOffsetOff, termOffset)
 		term.PutInt32(termOffset+FrameSessionIDOff, p.sessionID)
 		term.PutInt32(termOffset+FrameStreamIDOff, p.streamID)
@@ -439,7 +442,9 @@ func (p *Publication) OfferWithBackoff(ctx context.Context, buf []byte, timeout 
 
 // IsConnected returns whether the publication has active subscribers.
 func (p *Publication) IsConnected() bool {
-	return p.logBuffers != nil && p.logBuffers.IsConnected()
+	// A closed publication's log is unmapped after the linger, so it must not
+	// be read.
+	return !p.closed.Load() && p.logBuffers != nil && p.logBuffers.IsConnected()
 }
 
 // StreamID returns the stream identifier.

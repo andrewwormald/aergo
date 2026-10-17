@@ -263,7 +263,7 @@ func (a *TermAppender) Append(
 	a.term.PutInt32(termOffset+FrameLengthOffset, 0) // uncommitted
 	a.term.PutUint8(termOffset+FrameVersionOffset, 0)
 	a.term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
-	a.term.PutInt32(termOffset+FrameTypeOffset, FrameTypeData)
+	a.term.PutInt16(termOffset+FrameTypeOffset, FrameTypeData)
 	a.term.PutInt32(termOffset+FrameTermOffsetOff, termOffset)
 	a.term.PutInt32(termOffset+FrameSessionIDOff, sessionID)
 	a.term.PutInt32(termOffset+FrameStreamIDOff, streamID)
@@ -332,7 +332,7 @@ func readTerm(
 		}
 
 		alignedLen := align(frameLen, DataFrameHeaderLen)
-		frameType := int16(term.GetInt32(offset + FrameTypeOffset))
+		frameType := term.GetInt16(offset + FrameTypeOffset)
 
 		if frameType != int16(FrameTypePadding) {
 			*hdr = DataFrameHeader{

@@ -109,7 +109,7 @@ Log Buffer Files (per publication/subscription)
 └── Metadata            → tail positions, connection status
 ```
 
-Data-plane reads and writes use `sync/atomic` directly on the mmap'd shared memory. `Publication.Offer` is fully lock-free; `Subscription.Poll` takes a brief `sync.Mutex` only to snapshot the image set published by the conductor, then iterates and reads from each term buffer lock-free.
+Data-plane reads and writes use `sync/atomic` directly on the mmap'd shared memory (the one exception is the release store on amd64, a plain `MOV` in `atomic_store_amd64.s`). `Publication.Offer` and `Subscription.Poll` are both lock-free: the conductor publishes an immutable snapshot of a subscription's images, which `Poll` reads without taking a lock, and hands the handler a view straight into the term buffer.
 
 ## Tests
 

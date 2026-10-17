@@ -562,7 +562,10 @@ func (c *Conductor) onNewPublication(msg []byte) {
 	}
 
 	c.mu.Lock()
-	if pub := c.publications[corrID]; pub != nil {
+	adopted := false
+	// Only a pending add that has no log yet takes the mapping. A reply for an
+	// add that is gone (it timed out) or a duplicate reply must not keep it.
+	if pub := c.publications[corrID]; pub != nil && pub.logBuffers == nil {
 		pub.registrationID = regID
 		pub.sessionID = sessionID
 		pub.posLimitCounterID = posLimitID
@@ -573,9 +576,14 @@ func (c *Conductor) onNewPublication(msg []byte) {
 		} else {
 			pub.logBuffers = lb
 			pub.ready = true
+			adopted = true
 		}
 	}
 	c.mu.Unlock()
+
+	if lb != nil && !adopted {
+		c.releaseLog(lb)
+	}
 }
 
 func (c *Conductor) onSubscriptionReady(msg []byte) {
@@ -667,6 +675,33 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 		sub.publishImages()
 	}
 	c.mu.Unlock()
+
+	// The subscription was closed (or never existed): nobody will use the image.
+	if sub == nil {
+		c.releaseLog(lb)
+	}
+}
+
+// releaseSubscription is called when the client closes a subscription. The
+// driver does not report the images of a closed subscription as unavailable,
+// so their logs are released here (after the linger, in case a goroutine is
+// still polling) and the state is dropped, so an image that arrives late is
+// released too. Java's Subscription.close does the same.
+func (c *Conductor) releaseSubscription(registrationID int64) {
+	c.mu.Lock()
+	sub := c.subscriptions[registrationID]
+	delete(c.subscriptions, registrationID)
+	var images []*Image
+	if sub != nil {
+		images = sub.images
+		sub.images = nil
+		sub.publishImages()
+	}
+	c.mu.Unlock()
+
+	for _, img := range images {
+		c.lingerLog(img.LogBuffers)
+	}
 }
 
 func (c *Conductor) onUnavailableImage(msg []byte) {

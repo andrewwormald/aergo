@@ -109,7 +109,7 @@ func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int)
 		}
 		aligned := align(frameLen, DataFrameHeaderLen)
 
-		if int16(term.GetInt32(offset+FrameTypeOffset)) != FrameTypePadding {
+		if term.GetInt16(offset+FrameTypeOffset) != FrameTypePadding {
 			// The handler gets a view straight into the log, as Java's
 			// FragmentHandler does, so the payload is not copied unless the
 			// handler copies it. The header is reused across fragments. Both
@@ -151,9 +151,12 @@ func (s *Subscription) StreamID() int32 { return s.streamID }
 // Close releases the subscription.
 func (s *Subscription) Close() {
 	if s.closed.CompareAndSwap(false, true) {
-		// A loopback subscription has no driver to tell.
-		if s.conductor != nil && s.conductor.proxy != nil {
-			s.conductor.proxy.RemoveSubscription(s.registrationID)
+		if s.conductor != nil {
+			// A loopback subscription has no driver to tell.
+			if s.conductor.proxy != nil {
+				s.conductor.proxy.RemoveSubscription(s.registrationID)
+			}
+			s.conductor.releaseSubscription(s.registrationID)
 		}
 	}
 }
