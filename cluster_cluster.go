@@ -96,7 +96,13 @@ type AeronCluster struct {
 
 	aeronClient *Aeron
 	egressSub   *Subscription
-	ingressPubs []*Publication
+
+	// egressFragments reassembles fragmented egress messages for dispatchEgress.
+	// It holds partial messages, so it is replaced with each egress subscription.
+	egressFragments FragmentHandler
+	egressStage     ClusterState // state the current poll started in
+	egressWork      int          // messages handled by the current poll
+	ingressPubs     []*Publication
 
 	leaderMemberId    int32
 	leadershipTermId  int64
@@ -241,6 +247,7 @@ func (c *AeronCluster) createEgressSubscription() int {
 		return 0
 	}
 	c.egressSub = sub
+	c.egressFragments = NewFragmentAssembler(c.dispatchEgress).OnFragment
 	c.state = StateAwaitSubscriptionConnected
 	return 1
 }
@@ -317,46 +324,8 @@ func (c *AeronCluster) sendConnectRequest() int {
 }
 
 func (c *AeronCluster) awaitConnectReply() int {
-	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *Header) {
-		if len(buffer) < HeaderSize {
-			return
-		}
-		var hdr MessageHeader
-		hdr.Decode(buffer, 0)
-
-		if hdr.TemplateId == TemplateIdSessionEvent {
-			var evt SessionEvent
-			evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
-			if evt.CorrelationId == c.correlationId {
-				if evt.Code == EventCodeOK {
-					c.clusterSessionId = evt.ClusterSessionId
-					c.leaderMemberId = evt.LeaderMemberId
-					c.leadershipTermId = evt.LeadershipTermId
-					c.lastKeepAliveMs = time.Now().UnixMilli()
-					c.state = StateConnected
-					c.reconnectAttempts = 0
-					c.reconnectBackoff = c.cfg.ReconnectBackoffMs
-					c.redirectAttempts = 0
-					c.cfg.Listener.OnSessionEvent(c, &evt)
-				} else if evt.Code == EventCodeRedirect && c.redirectAttempts < maxRedirectAttempts {
-					// The member we asked isn't the leader; it names the
-					// actual leader in LeaderMemberId. Retry against that
-					// member instead of treating this as a rejection —
-					// leaderPublication() (used by sendConnectRequest) picks
-					// it up via c.leaderMemberId on the next attempt.
-					c.redirectAttempts++
-					c.leaderMemberId = evt.LeaderMemberId
-					c.cfg.Listener.OnSessionEvent(c, &evt)
-					c.state = StateSendConnectRequest
-				} else {
-					c.cfg.Listener.OnSessionEvent(c, &evt)
-					c.handleDisconnect(fmt.Sprintf("rejected: %s", evt.Detail))
-				}
-			}
-		}
-		workCount++
-	}, 10)
+	c.pollEgress(StateAwaitConnectReply)
+	workCount := c.egressWork
 
 	if c.state == StateAwaitConnectReply && c.isConnectTimedOut() {
 		c.handleDisconnect("connect reply timeout")
@@ -365,48 +334,8 @@ func (c *AeronCluster) awaitConnectReply() int {
 }
 
 func (c *AeronCluster) pollConnected() int {
-	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *Header) {
-		if len(buffer) < HeaderSize {
-			return
-		}
-		var hdr MessageHeader
-		hdr.Decode(buffer, 0)
-		bodyOffset := HeaderSize
-
-		switch hdr.TemplateId {
-		case TemplateIdSessionMessageHeader:
-			var smh SessionMessageHeader
-			consumed := smh.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
-			payloadOffset := bodyOffset + consumed
-			payloadLen := len(buffer) - payloadOffset
-			c.cfg.Listener.OnMessage(c, smh.Timestamp, buffer, payloadOffset, payloadLen)
-
-		case TemplateIdSessionEvent:
-			var evt SessionEvent
-			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
-			c.cfg.Listener.OnSessionEvent(c, &evt)
-			if evt.Code == EventCodeClosed {
-				c.handleDisconnect("session closed by cluster")
-			}
-
-		case TemplateIdNewLeaderEvent:
-			var evt NewLeaderEvent
-			evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
-			c.leaderMemberId = evt.LeaderMemberId
-			c.leadershipTermId = evt.LeadershipTermId
-			c.cfg.Listener.OnNewLeader(c, &evt)
-
-		case TemplateIdChallenge:
-			var ch Challenge
-			ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
-			c.handleChallenge(&ch)
-
-		default:
-			c.cfg.Listener.OnMessage(c, 0, buffer, 0, len(buffer))
-		}
-		workCount++
-	}, 10)
+	c.pollEgress(StateConnected)
+	workCount := c.egressWork
 
 	nowMs := time.Now().UnixMilli()
 	if nowMs-c.lastKeepAliveMs >= c.cfg.KeepAliveIntervalMs {
@@ -418,22 +347,8 @@ func (c *AeronCluster) pollConnected() int {
 }
 
 func (c *AeronCluster) pollClosing() int {
-	workCount := 0
-	c.egressSub.Poll(func(buffer []byte, header *Header) {
-		if len(buffer) < HeaderSize {
-			return
-		}
-		var hdr MessageHeader
-		hdr.Decode(buffer, 0)
-		if hdr.TemplateId == TemplateIdSessionEvent {
-			var evt SessionEvent
-			evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
-			if evt.Code == EventCodeClosed {
-				c.cfg.Listener.OnSessionEvent(c, &evt)
-			}
-		}
-		workCount++
-	}, 10)
+	c.pollEgress(StateClosing)
+	workCount := c.egressWork
 	c.state = StateClosed
 	return workCount
 }
@@ -447,6 +362,134 @@ func (c *AeronCluster) sendCloseRequest() {
 	if pub := c.leaderPublication(); pub != nil {
 		_, _ = pub.Offer(c.sendBuf[:n]) // best effort: the session times out on its own
 	}
+}
+
+// pollEgress reads the egress subscription for the state the caller is in.
+// A message longer than one frame arrives as fragments, so everything goes
+// through a FragmentAssembler (Java's AeronCluster does the same) and the
+// handlers only ever see whole messages. The handler is chosen by the state
+// the poll started in, not the state a message leaves behind, so a session
+// event that moves the state does not change how the rest of the batch is read.
+func (c *AeronCluster) pollEgress(stage ClusterState) {
+	c.egressWork = 0
+	c.egressStage = stage
+	c.egressSub.Poll(c.egressFragments, 10)
+}
+
+// dispatchEgress receives each reassembled egress message.
+func (c *AeronCluster) dispatchEgress(buffer []byte, _ *Header) {
+	if len(buffer) < HeaderSize {
+		return
+	}
+	switch c.egressStage {
+	case StateAwaitConnectReply:
+		c.onConnectReplyMessage(buffer)
+	case StateConnected:
+		c.onConnectedMessage(buffer)
+	case StateClosing:
+		c.onClosingMessage(buffer)
+	}
+}
+
+// onConnectReplyMessage handles one complete egress message while in StateAwaitConnectReply.
+func (c *AeronCluster) onConnectReplyMessage(buffer []byte) {
+	if len(buffer) < HeaderSize {
+		return
+	}
+	var hdr MessageHeader
+	hdr.Decode(buffer, 0)
+
+	if hdr.TemplateId == TemplateIdSessionEvent {
+		var evt SessionEvent
+		evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
+		if evt.CorrelationId == c.correlationId {
+			if evt.Code == EventCodeOK {
+				c.clusterSessionId = evt.ClusterSessionId
+				c.leaderMemberId = evt.LeaderMemberId
+				c.leadershipTermId = evt.LeadershipTermId
+				c.lastKeepAliveMs = time.Now().UnixMilli()
+				c.state = StateConnected
+				c.reconnectAttempts = 0
+				c.reconnectBackoff = c.cfg.ReconnectBackoffMs
+				c.redirectAttempts = 0
+				c.cfg.Listener.OnSessionEvent(c, &evt)
+			} else if evt.Code == EventCodeRedirect && c.redirectAttempts < maxRedirectAttempts {
+				// The member we asked isn't the leader; it names the
+				// actual leader in LeaderMemberId. Retry against that
+				// member instead of treating this as a rejection —
+				// leaderPublication() (used by sendConnectRequest) picks
+				// it up via c.leaderMemberId on the next attempt.
+				c.redirectAttempts++
+				c.leaderMemberId = evt.LeaderMemberId
+				c.cfg.Listener.OnSessionEvent(c, &evt)
+				c.state = StateSendConnectRequest
+			} else {
+				c.cfg.Listener.OnSessionEvent(c, &evt)
+				c.handleDisconnect(fmt.Sprintf("rejected: %s", evt.Detail))
+			}
+		}
+	}
+	c.egressWork++
+}
+
+// onConnectedMessage handles one complete egress message while in StateConnected.
+func (c *AeronCluster) onConnectedMessage(buffer []byte) {
+	if len(buffer) < HeaderSize {
+		return
+	}
+	var hdr MessageHeader
+	hdr.Decode(buffer, 0)
+	bodyOffset := HeaderSize
+
+	switch hdr.TemplateId {
+	case TemplateIdSessionMessageHeader:
+		var smh SessionMessageHeader
+		consumed := smh.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
+		payloadOffset := bodyOffset + consumed
+		payloadLen := len(buffer) - payloadOffset
+		c.cfg.Listener.OnMessage(c, smh.Timestamp, buffer, payloadOffset, payloadLen)
+
+	case TemplateIdSessionEvent:
+		var evt SessionEvent
+		evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
+		c.cfg.Listener.OnSessionEvent(c, &evt)
+		if evt.Code == EventCodeClosed {
+			c.handleDisconnect("session closed by cluster")
+		}
+
+	case TemplateIdNewLeaderEvent:
+		var evt NewLeaderEvent
+		evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
+		c.leaderMemberId = evt.LeaderMemberId
+		c.leadershipTermId = evt.LeadershipTermId
+		c.cfg.Listener.OnNewLeader(c, &evt)
+
+	case TemplateIdChallenge:
+		var ch Challenge
+		ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
+		c.handleChallenge(&ch)
+
+	default:
+		c.cfg.Listener.OnMessage(c, 0, buffer, 0, len(buffer))
+	}
+	c.egressWork++
+}
+
+// onClosingMessage handles one complete egress message while in StateClosing.
+func (c *AeronCluster) onClosingMessage(buffer []byte) {
+	if len(buffer) < HeaderSize {
+		return
+	}
+	var hdr MessageHeader
+	hdr.Decode(buffer, 0)
+	if hdr.TemplateId == TemplateIdSessionEvent {
+		var evt SessionEvent
+		evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
+		if evt.Code == EventCodeClosed {
+			c.cfg.Listener.OnSessionEvent(c, &evt)
+		}
+	}
+	c.egressWork++
 }
 
 func (c *AeronCluster) handleChallenge(ch *Challenge) {
