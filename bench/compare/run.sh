@@ -9,7 +9,9 @@
 #   QUICK=1 bench/compare/run.sh         small counts, to check the setup
 #
 # Environment: ROUNDS (2), AERON_VERSION (1.53.3), AERON_JAR, DRIVER_CPUS,
-# CLIENT_CPUS, SIZES, OUT (bench/compare/results.txt), and EXTRA_GO: a space
+# CLIENT_CPUS, PIN (producer,consumer CPUs; "none" to leave threads floating),
+# IDLE (throughput consumer: spin, or backoff for Agrona's BackoffIdleStrategy),
+# SIZES, OUT (bench/compare/results.txt), and EXTRA_GO: a space
 # separated list of other Go harness binaries to include (for example one built
 # from another branch; each reports its own lang= label).
 set -euo pipefail
@@ -44,6 +46,16 @@ if [[ "$(nproc)" -ge 4 ]] && command -v taskset >/dev/null; then
 fi
 
 jvm=(--add-exports java.base/jdk.internal.misc=ALL-UNNAMED)
+
+args+=(-idle="${IDLE:-spin}")
+
+# Pin the two busy threads (publisher and consumer, pinger and ponger) to one
+# CPU each, so neither client is at the mercy of the scheduler putting them on
+# the same core. PIN=none leaves them floating.
+if [[ "${PIN:-}" != "none" ]]; then
+  cpus="${CLIENT_CPUS:-2,3}"
+  if [[ "$(nproc)" -ge 4 ]]; then args+=(-pin="${PIN:-$cpus}"); fi
+fi
 
 cleanup() {
   [[ -n "${driver_pid:-}" ]] && kill "$driver_pid" 2>/dev/null || true

@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/andrewwormald/aergo"
 )
@@ -37,6 +38,8 @@ func main() {
 	repeats := flag.Int("repeats", 5, "measured throughput runs per size")
 	latCount := flag.Int("latcount", 200000, "latency samples")
 	latWarmup := flag.Int("latwarmup", 50000, "latency warm-up round trips")
+	idle := flag.String("idle", "spin", "throughput consumer idle strategy: spin or backoff (Agrona defaults)")
+	pin := flag.String("pin", "", "CPUs for the two busy threads: producer,consumer (pinger,ponger)")
 	conductor := flag.Bool("conductor", true, "run DoWork on a background goroutine")
 	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	flag.Parse()
@@ -46,6 +49,9 @@ func main() {
 		check(pprof.StartCPUProfile(f))
 		defer pprof.StopCPUProfile()
 	}
+
+	parsePin(*pin)
+	consumerIdle = *idle
 
 	var sizes []int
 	for _, s := range strings.Split(*sizesArg, ",") {
@@ -64,6 +70,11 @@ func main() {
 	if *mode == "all" || *mode == "throughput" {
 		for _, size := range sizes {
 			throughput(client, size, *count, *repeats)
+		}
+	}
+	if *mode == "burst" {
+		for _, size := range sizes {
+			burst(client, size, *repeats)
 		}
 	}
 	if *mode == "all" || *mode == "latency" {
@@ -93,6 +104,40 @@ func startConductor(client *aergo.Aeron) (stop func()) {
 		}
 	}()
 	return func() { close(quit); <-done }
+}
+
+var (
+	pinProducer, pinConsumer = -1, -1
+	consumerIdle             = "spin"
+)
+
+func parsePin(arg string) {
+	if arg == "" {
+		return
+	}
+	parts := strings.Split(arg, ",")
+	if len(parts) != 2 {
+		check(fmt.Errorf("-pin wants producer,consumer"))
+	}
+	var err error
+	pinProducer, err = strconv.Atoi(parts[0])
+	check(err)
+	pinConsumer, err = strconv.Atoi(parts[1])
+	check(err)
+}
+
+// pinThread restricts the calling OS thread to one CPU. The goroutine must be
+// locked to its thread and must not return it to the scheduler pinned, so the
+// busy goroutines stay locked until they exit (which ends the thread).
+func pinThread(cpu int) {
+	if cpu < 0 {
+		return
+	}
+	var mask [16]uint64 // up to 1024 CPUs
+	mask[cpu/64] |= 1 << (cpu % 64)
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_SCHED_SETAFFINITY, 0, uintptr(len(mask)*8), uintptr(unsafe.Pointer(&mask[0]))); errno != 0 {
+		check(errno)
+	}
 }
 
 func check(err error) {
@@ -144,21 +189,26 @@ func throughput(client *aergo.Aeron, size, count, repeats int) {
 		done := make(chan struct{})
 		go func() {
 			runtime.LockOSThread()
+			pinThread(pinConsumer)
+			var idler aergo.IdleStrategy = aergo.NoOpIdleStrategy{}
+			if consumerIdle == "backoff" {
+				idler = aergo.NewBackoffIdleStrategy()
+			}
 			for local < int64(count) {
-				sub.Poll(asm.OnFragment, fragmentLimit)
+				idler.Idle(sub.Poll(asm.OnFragment, fragmentLimit))
 			}
 			received.Store(local)
 			close(done)
 		}()
 
 		runtime.LockOSThread()
+		pinThread(pinProducer)
 		t0 := time.Now()
 		for i := 0; i < count; i++ {
 			offer(pub, src)
 		}
 		<-done
 		secs := time.Since(t0).Seconds()
-		runtime.UnlockOSThread()
 
 		if run > 0 {
 			fmt.Printf("RESULT lang=go mode=throughput size=%d run=%d msgs=%d msgs_per_sec=%.0f mb_per_sec=%.1f\n",
@@ -190,6 +240,7 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	ponged := make(chan struct{})
 	go func() {
 		runtime.LockOSThread()
+		pinThread(pinConsumer)
 		for !stop.Load() {
 			pingSub.Poll(echo.OnFragment, fragmentLimit)
 		}
@@ -197,7 +248,7 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	}()
 
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	pinThread(pinProducer)
 	var ru0 syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
 	got := 0
@@ -230,4 +281,54 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 	}
 	fmt.Printf("RESULT lang=go mode=latency size=%d samples=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d minflt=%d\n",
 		size, count, pct(0.50), pct(0.90), pct(0.99), pct(0.999), samples[len(samples)-1], ru1.Minflt-ru0.Minflt)
+}
+
+// burst isolates the two halves of the pipeline: it times a publisher filling
+// the log with no consumer running (a burst small enough to stay inside the
+// flow-control window), then a consumer on another CPU draining it with no
+// publisher running.
+func burst(client *aergo.Aeron, size, repeats int) {
+	pub, err := client.AddPublication(channel, pingStream)
+	check(err)
+	defer pub.Close()
+	sub, err := client.AddSubscription(channel, pingStream)
+	check(err)
+	defer sub.Close()
+	await(pub)
+
+	n := 16 * 1024 * 1024 / (size + 32)
+	src := make([]byte, size)
+	runtime.LockOSThread()
+	pinThread(pinProducer)
+	for run := 0; run <= repeats; run++ { // run 0 is a discarded warm-up
+		var ru0, ru1 syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
+		t0 := time.Now()
+		for i := 0; i < n; i++ {
+			offer(pub, src)
+		}
+		pubSecs := time.Since(t0).Seconds()
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
+
+		var drainSecs float64
+		done := make(chan struct{})
+		go func() {
+			runtime.LockOSThread()
+			pinThread(pinConsumer)
+			got := 0
+			asm := aergo.NewFragmentAssembler(func([]byte, *aergo.Header) { got++ })
+			t1 := time.Now()
+			for got < n {
+				sub.Poll(asm.OnFragment, fragmentLimit)
+			}
+			drainSecs = time.Since(t1).Seconds()
+			close(done)
+		}()
+		<-done
+
+		if run > 0 {
+			fmt.Printf("RESULT lang=go mode=burst size=%d run=%d msgs=%d publish_msgs_per_sec=%.0f drain_msgs_per_sec=%.0f publish_minflt=%d\n",
+				size, run, n, float64(n)/pubSecs, float64(n)/drainSecs, ru1.Minflt-ru0.Minflt)
+		}
+	}
 }
