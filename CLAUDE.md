@@ -52,5 +52,5 @@ package aergo (repo root, single package)
 - `Cluster` interface decouples consumers from the concrete `AeronCluster` type
 - Aeron-idiomatic naming: `Aeron`, `Connect`, `Context`, `Publication`, `Subscription`, `Image`, `FragmentHandler`, `Conductor`
 - Zero external dependencies -- pure Go standard library only
-- All shared memory access via `sync/atomic` and `unsafe.Pointer` on mmap'd files
+- All shared memory access via `sync/atomic` and `unsafe.Pointer` on mmap'd files. The one exception is the ordered (release) store on amd64: `atomic_store_amd64.s` is a plain `MOV`, because x86 stores are already release stores and `sync/atomic`'s `XCHG` would wait for the whole message payload to drain first (as Java's `putOrdered` does not). Other architectures and `-race` builds use `sync/atomic` (`atomic_store_other.go`). Still no CGO.
 - No internal logging: the library never writes to a process-global logger. Synchronous failures are returned as errors; the poll-driven cluster state machine (which has no synchronous caller to return to) reports failures via `EgressListener.OnError` instead. Callers decide whether/where to log.

@@ -107,11 +107,11 @@ func (b *AtomicBuffer) GetInt64Volatile(offset int32) int64 {
 // --- Atomic (ordered) writes ---
 
 func (b *AtomicBuffer) PutInt32Ordered(offset int32, value int32) {
-	atomic.StoreInt32((*int32)(b.ptrAt(offset)), value)
+	storeRelease32((*int32)(b.ptrAt(offset)), value)
 }
 
 func (b *AtomicBuffer) PutInt64Ordered(offset int32, value int64) {
-	atomic.StoreInt64((*int64)(b.ptrAt(offset)), value)
+	storeRelease64((*int64)(b.ptrAt(offset)), value)
 }
 
 // --- CAS ---

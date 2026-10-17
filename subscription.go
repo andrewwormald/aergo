@@ -15,6 +15,11 @@ type Header struct {
 }
 
 // FragmentHandler is called for each received message fragment.
+//
+// As in the Java client, buffer is a view into the log buffer, not a copy: it
+// is valid only until the handler returns, and the handler must not modify or
+// retain it. Copy what you need to keep. header is likewise only valid for the
+// call.
 type FragmentHandler func(buffer []byte, header *Header)
 
 // Subscription receives messages from one or more publications via images.
@@ -35,9 +40,8 @@ type Subscription struct {
 	// Scratch reused across fragments, owned by the polling goroutine.
 	// Both are handed to the handler, which is why the contract above
 	// says they are only valid for the duration of the call.
-	payloadScratch []byte
-	headerScratch  Header
-	frameScratch   DataFrameHeader
+	headerScratch Header
+	frameScratch  DataFrameHeader
 }
 
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
@@ -88,23 +92,14 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		term := img.LogBuffers.Term(partIndex)
 
 		fragments, newOffset := readTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
-			// Reuse the buffer and header across fragments rather than
-			// allocating a pair per message. Both are only valid for the
-			// duration of the handler call, which is the contract Aeron
-			// itself has and what every consumer here already assumes -
-			// they decode or copy before returning.
-			if cap(s.payloadScratch) < int(length) {
-				// Grow with slack rather than to the exact size, so a
-				// stream of increasing payloads settles instead of
-				// reallocating on each new high-water mark.
-				grown := 2 * cap(s.payloadScratch)
-				if grown < int(length) {
-					grown = int(length)
-				}
-				s.payloadScratch = make([]byte, grown)
+			// The handler gets a view straight into the log, as Java's
+			// FragmentHandler does, so the payload is not copied unless the
+			// handler copies it. The header is reused across fragments. Both
+			// are valid only for the duration of the call.
+			if length < 0 || int64(offset)+int64(length) > int64(buf.Capacity()) {
+				return // a frame length the term cannot hold; do not read past it
 			}
-			payload := s.payloadScratch[:length]
-			buf.GetBytes(offset, payload)
+			payload := buf.Slice(offset, length)
 
 			alignedFrame := align(hdr.FrameLength, DataFrameHeaderLen)
 			pos := computePosition(hdr.TermID, hdr.TermOffset+alignedFrame, termLen, initialTermID)
