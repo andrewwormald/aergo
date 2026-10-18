@@ -1,4 +1,4 @@
-//go:build amd64 && !race
+//go:build amd64 && !race && !aergo_noasm
 
 #include "textflag.h"
 

@@ -75,6 +75,10 @@ client, err := aergo.Connect(
 )
 ```
 
+## Supported platforms
+
+Linux on **amd64** and **arm64**, both tested natively in CI. The client reads and writes the driver's memory-mapped files directly, so it relies on the log's little-endian layout; big-endian targets fail to build. On amd64 the release store that commits a frame is a two-instruction assembly routine; on arm64 it is Go's own atomic store, which compiles to the same single `STLR` instruction Java uses. `-tags aergo_noasm` forces the pure-Go store on amd64.
+
 ## Building the Media Driver
 
 `aergo` is a client -- it talks to a running `aeronmd` process via shared memory. The media driver itself is the upstream Aeron C/C++ build; this repo does not bundle a build script. Follow the upstream build instructions:

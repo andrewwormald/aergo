@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both architectures run natively: the release store is assembly on
+          # amd64 and sync/atomic (a single STLR) on arm64, and arm64 is weakly
+          # ordered, so it is where an ordering mistake would show.
+          - name: linux-amd64
+            os: ubuntu-latest
+            other_arch: arm64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            other_arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      - name: vet for the other architecture
+        run: GOARCH=${{ matrix.other_arch }} go vet ./...
+      - name: test
+        run: go test -count=1 ./...
+      - name: test with the race detector
+        run: go test -count=1 -race ./...
+      - name: test the pure-Go release store (on amd64 this replaces the assembly)
+        run: go test -count=1 -tags aergo_noasm ./...
