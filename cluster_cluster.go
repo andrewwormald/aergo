@@ -9,6 +9,11 @@ import (
 )
 
 // Cluster is the interface for sending and receiving messages on an Aeron cluster.
+//
+// An AeronCluster is driven from one goroutine at a time: Poll, Offer and the
+// other methods share state and an encoding buffer without locking, and its
+// ingress publications are exclusive (single writer). Call them all from the
+// same goroutine, or serialise the calls yourself.
 type Cluster interface {
 	Connect()
 	Poll() int
@@ -288,7 +293,9 @@ func (c *AeronCluster) createIngressPublications() int {
 		if c.cfg.IngressChannel != "" {
 			uri = c.cfg.IngressChannel
 		}
-		pub, err := c.aeronClient.AddPublication(uri, c.cfg.IngressStreamId)
+		// Exclusive, as in Java's AeronCluster: the client is driven from one
+		// goroutine, so each ingress publication has a single writer.
+		pub, err := c.aeronClient.AddExclusivePublication(uri, c.cfg.IngressStreamId)
 		if err != nil {
 			c.cfg.Listener.OnError(c, fmt.Errorf("create ingress publication to member %d: %w", member.MemberId, err))
 			continue

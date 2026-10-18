@@ -38,6 +38,7 @@ func main() {
 	repeats := flag.Int("repeats", 5, "measured throughput runs per size")
 	latCount := flag.Int("latcount", 200000, "latency samples")
 	latWarmup := flag.Int("latwarmup", 50000, "latency warm-up round trips")
+	exclusive := flag.Bool("exclusive", false, "use exclusive publications (single writer), as the cluster client does")
 	idle := flag.String("idle", "spin", "throughput consumer idle strategy: spin or backoff (Agrona defaults)")
 	pin := flag.String("pin", "", "CPUs for the two busy threads: producer,consumer (pinger,ponger)")
 	conductorMs := flag.Int("conductor-ms", 16, "DoWork interval; Java's client conductor sleeps 16 ms between duty cycles")
@@ -52,6 +53,7 @@ func main() {
 	}
 
 	parsePin(*pin)
+	useExclusive = *exclusive
 	conductorInterval = time.Duration(*conductorMs) * time.Millisecond
 	consumerIdle = *idle
 
@@ -110,6 +112,7 @@ func startConductor(client *aergo.Aeron) (stop func()) {
 }
 
 var (
+	useExclusive             bool
 	conductorInterval        = 16 * time.Millisecond
 	pinProducer, pinConsumer = -1, -1
 	consumerIdle             = "spin"
@@ -142,6 +145,14 @@ func pinThread(cpu int) {
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_SCHED_SETAFFINITY, 0, uintptr(len(mask)*8), uintptr(unsafe.Pointer(&mask[0]))); errno != 0 {
 		check(errno)
 	}
+}
+
+// addPublication adds a shared publication, or an exclusive one with -exclusive.
+func addPublication(client *aergo.Aeron, stream int32) (*aergo.Publication, error) {
+	if useExclusive {
+		return client.AddExclusivePublication(channel, stream)
+	}
+	return client.AddPublication(channel, stream)
 }
 
 func check(err error) {
@@ -177,7 +188,7 @@ func offer(pub *aergo.Publication, buf []byte) {
 // throughput: one publisher, one polling goroutine; time from first offer
 // until every message is received.
 func throughput(client *aergo.Aeron, size, count, repeats int) {
-	pub, err := client.AddPublication(channel, pingStream)
+	pub, err := addPublication(client, pingStream)
 	check(err)
 	defer pub.Close()
 	sub, err := client.AddSubscription(channel, pingStream)
@@ -223,13 +234,13 @@ func throughput(client *aergo.Aeron, size, count, repeats int) {
 
 // latency: closed-loop ping-pong, one message outstanding; round-trip time in ns.
 func latency(client *aergo.Aeron, size, count, warmup int) {
-	ping, err := client.AddPublication(channel, pingStream)
+	ping, err := addPublication(client, pingStream)
 	check(err)
 	defer ping.Close()
 	pingSub, err := client.AddSubscription(channel, pingStream)
 	check(err)
 	defer pingSub.Close()
-	pong, err := client.AddPublication(channel, pongStream)
+	pong, err := addPublication(client, pongStream)
 	check(err)
 	defer pong.Close()
 	pongSub, err := client.AddSubscription(channel, pongStream)
@@ -310,7 +321,7 @@ func latency(client *aergo.Aeron, size, count, warmup int) {
 // flow-control window), then a consumer on another CPU draining it with no
 // publisher running.
 func burst(client *aergo.Aeron, size, repeats int) {
-	pub, err := client.AddPublication(channel, pingStream)
+	pub, err := addPublication(client, pingStream)
 	check(err)
 	defer pub.Close()
 	sub, err := client.AddSubscription(channel, pingStream)

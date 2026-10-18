@@ -70,6 +70,7 @@ type lingeringLog struct {
 
 type publicationState struct {
 	correlationID     int64
+	exclusive         bool // added with AddExclusivePublication: one writer, see Publication
 	registrationID    int64
 	channel           string
 	streamID          int32
@@ -276,6 +277,7 @@ func (c *Conductor) AddExclusivePublication(channel string, streamID int32) int6
 	c.mu.Lock()
 	c.publications[corrID] = &publicationState{
 		correlationID: corrID,
+		exclusive:     true,
 		channel:       channel,
 		streamID:      streamID,
 	}

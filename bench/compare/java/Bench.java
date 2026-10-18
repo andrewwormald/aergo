@@ -31,6 +31,7 @@ public final class Bench
     static int pinProducer = -1;
     static int pinConsumer = -1;
     static boolean backoff;
+    static boolean exclusive;
 
     public static void main(final String[] args) throws Exception
     {
@@ -42,6 +43,7 @@ public final class Bench
         final int latCount = Integer.parseInt(arg(args, "latcount", "200000"));
         final int latWarmup = Integer.parseInt(arg(args, "latwarmup", "50000"));
         backoff = arg(args, "idle", "spin").equals("backoff");
+        exclusive = arg(args, "exclusive", "false").equals("true");
         final String pin = arg(args, "pin", "");
         if (!pin.isEmpty())
         {
@@ -99,6 +101,12 @@ public final class Bench
         }
     }
 
+    /** A shared publication, or an exclusive one (single writer) with -exclusive=true. */
+    static Publication addPublication(final Aeron aeron, final int stream)
+    {
+        return exclusive ? aeron.addExclusivePublication(CHANNEL, stream) : aeron.addPublication(CHANNEL, stream);
+    }
+
     static String arg(final String[] args, final String key, final String def)
     {
         for (final String a : args)
@@ -140,7 +148,7 @@ public final class Bench
     /** One publisher, one polling thread; time from first offer until every message is received. */
     static void throughput(final Aeron aeron, final int size, final int count, final int repeats) throws Exception
     {
-        try (Publication pub = aeron.addPublication(CHANNEL, PING);
+        try (Publication pub = addPublication(aeron, PING);
             Subscription sub = aeron.addSubscription(CHANNEL, PING))
         {
             await(pub);
@@ -186,7 +194,7 @@ public final class Bench
      */
     static void burst(final Aeron aeron, final int size, final int repeats) throws Exception
     {
-        try (Publication pub = aeron.addPublication(CHANNEL, PING);
+        try (Publication pub = addPublication(aeron, PING);
             Subscription sub = aeron.addSubscription(CHANNEL, PING))
         {
             await(pub);
@@ -232,9 +240,9 @@ public final class Bench
     /** Closed-loop ping-pong, one message outstanding; round-trip time in ns. */
     static void latency(final Aeron aeron, final int size, final int count, final int warmup) throws Exception
     {
-        try (Publication ping = aeron.addPublication(CHANNEL, PING);
+        try (Publication ping = addPublication(aeron, PING);
             Subscription pingSub = aeron.addSubscription(CHANNEL, PING);
-            Publication pong = aeron.addPublication(CHANNEL, PONG);
+            Publication pong = addPublication(aeron, PONG);
             Subscription pongSub = aeron.addSubscription(CHANNEL, PONG))
         {
             await(ping);

@@ -58,6 +58,10 @@ for cc.State() != aergo.StateConnected {
 pos, err := cc.Offer([]byte("hello cluster"))
 ```
 
+### Shared and exclusive publications
+
+`AddPublication` gives a publication any number of goroutines may offer to at once. `AddExclusivePublication` gives one that only a single goroutine may offer to at a time (as Java's `ExclusivePublication`): it is a little faster, because it reserves space in the log without an atomic add, but two goroutines offering together would corrupt the log. The cluster client uses exclusive publications for ingress, so drive an `AeronCluster` from one goroutine.
+
 ### Message size
 
 `Offer` follows the Java client. A message longer than one frame (`pub.MaxPayloadLength()`, the MTU minus the 32-byte header) is split into fragments, so wrap your handler in a `FragmentAssembler` to receive it whole. One longer than `pub.MaxMessageLength()` (an eighth of the term length, at most 16 MiB) can never be sent: `Offer` returns a `*MessageTooLongError` (`errors.Is(err, aergo.ErrMessageTooLong)`) and writes nothing.

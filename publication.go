@@ -10,6 +10,14 @@ import (
 )
 
 // Publication wraps a log buffer for sending messages to a stream.
+//
+// A publication from AddPublication may be offered to from any number of
+// goroutines at once. One from AddExclusivePublication is faster, because it
+// reserves space in the log without an atomic read-modify-write, but only one
+// goroutine may call Offer, OfferParts or TryClaim on it at a time (Java's
+// ExclusivePublication has the same rule); two at once would claim the same
+// space and corrupt the log. Close, IsConnected and the accessors are safe from
+// any goroutine.
 type Publication struct {
 	conductor      *Conductor
 	state          *publicationState
@@ -20,6 +28,9 @@ type Publication struct {
 	logBuffers     *LogBuffers
 	initialTermID  int32
 	closed         atomic.Bool
+
+	// exclusive: a single goroutine offers, so the tail needs no atomic add.
+	exclusive bool
 
 	// maxPayloadLength is the most payload one frame carries (MTU minus the
 	// frame header); a longer message is fragmented. maxMessageLength is the
@@ -38,6 +49,7 @@ func newPublication(conductor *Conductor, state *publicationState) *Publication 
 	p := &Publication{
 		conductor:         conductor,
 		state:             state,
+		exclusive:         state.exclusive,
 		channel:           state.channel,
 		streamID:          state.streamID,
 		sessionID:         state.sessionID,
@@ -278,9 +290,19 @@ func (p *Publication) claimSpace(alignedLen int32) (*AtomicBuffer, int32, int32,
 		return nil, 0, 0, p.backPressureStatus(position, alignedLen, termLen)
 	}
 
-	// Claim space: atomically add to the tail, then work with the claimed
-	// termID/termOffset from the returned raw tail.
-	rawTail = meta.GetAndAddInt64(tailOff, int64(alignedLen))
+	// Claim space, then work with the claimed termID/termOffset from the raw
+	// tail as it was before the claim.
+	if p.exclusive {
+		// Only this goroutine moves the tail, so the value read above is
+		// current: store the new one with release semantics. No atomic
+		// read-modify-write (a LOCK XADD on amd64), which would wait for the
+		// previous message's stores to drain. This is what Java's
+		// ExclusivePublication does.
+		meta.PutInt64Ordered(tailOff, rawTail+int64(alignedLen))
+	} else {
+		// Shared: other goroutines may claim at the same moment, so add atomically.
+		rawTail = meta.GetAndAddInt64(tailOff, int64(alignedLen))
+	}
 	termID = rawTailTermID(rawTail)
 	termOffset = rawTailTermOffset(rawTail, termLen)
 

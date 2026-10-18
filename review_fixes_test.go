@@ -176,9 +176,10 @@ func TestAbortKeepsTheTermOffset(t *testing.T) {
 // publishAndPollConcurrently runs publishers while a subscriber polls the same
 // log at the same time, which is the visibility the ordering claims depend on,
 // and checks every message arrives whole and exactly once.
-func publishAndPollConcurrently(t *testing.T, termLen int32, workers, each, size int) (adminActions int) {
+func publishAndPollConcurrently(t *testing.T, termLen int32, workers, each, size int, exclusive bool) (adminActions int) {
 	t.Helper()
 	pub, sub, _ := newFragPair(termLen)
+	pub.exclusive = exclusive
 	total := workers * each
 
 	var mu sync.Mutex
@@ -263,7 +264,7 @@ func publishAndPollConcurrently(t *testing.T, termLen int32, workers, each, size
 // the handoff between the frame-length store and the poller's load is seen as
 // ordered, which a plain store of the first header word was not.
 func TestSubscriberPollsWhilePublishersWrite(t *testing.T) {
-	publishAndPollConcurrently(t, 4*1024*1024, 4, 100, 3000)
+	publishAndPollConcurrently(t, 4*1024*1024, 4, 100, 3000, false)
 }
 
 // Concurrent fragmented offers whose claims straddle the end of a term: one
@@ -272,7 +273,7 @@ func TestSubscriberPollsWhilePublishersWrite(t *testing.T) {
 // so no partition is reused (nothing here emulates the driver cleaning them).
 func TestConcurrentFragmentedOffersAcrossTermEnds(t *testing.T) {
 	const termLen = 512 * 1024
-	admin := publishAndPollConcurrently(t, termLen, 4, 40, 7000)
+	admin := publishAndPollConcurrently(t, termLen, 4, 40, 7000, false)
 	if admin == 0 {
 		t.Error("no offer hit the end of a term; the test is not exercising rotation")
 	}

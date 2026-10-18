@@ -129,6 +129,11 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 //
 // On the driver side this is a different command (CmdAddExclusivePublication)
 // but the response and Publication type are identical to AddPublication.
+//
+// In exchange for the private log, only one goroutine may offer to the
+// returned publication at a time. That is what lets it reserve space without
+// an atomic read-modify-write (see Publication); use AddPublication when
+// several goroutines send.
 func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
 	if err := c.preAddCheck(); err != nil {
 		return nil, err
