@@ -96,6 +96,8 @@ func (c *Aeron) awaitError(corrID int64) error {
 }
 
 // AddPublication creates a publication for the given channel and stream.
+// The returned publication is shared: any number of goroutines may offer to it
+// at once. For one writer goroutine, AddExclusivePublication is faster.
 func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, error) {
 	if err := c.preAddCheck(); err != nil {
 		return nil, err
