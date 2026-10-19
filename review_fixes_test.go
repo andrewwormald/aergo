@@ -475,7 +475,7 @@ func TestClusterFreesReassemblyStateOfAnEndedEgressSession(t *testing.T) {
 
 	c.egressSub.conductor.onUnavailableImage(unavailableImageReply(0, c.egressSub.registrationID))
 	runAfterWork(c.egressSub.conductor)
-	c.pollEgress(StateConnected) // frees on the polling goroutine
+	c.pollEgress() // frees on the polling goroutine
 
 	if len(c.egressAssembler.builders) != 0 {
 		t.Errorf("%d builders left for a session that ended", len(c.egressAssembler.builders))

@@ -139,7 +139,7 @@ func TestClusterEgressConnectReply(t *testing.T) {
 // Handling egress must not allocate per poll once connected and idle.
 func TestClusterEgressIdlePollDoesNotAllocate(t *testing.T) {
 	c, _, _ := newEgressTestCluster(StateConnected)
-	if allocs := testing.AllocsPerRun(100, func() { c.pollEgress(StateConnected) }); allocs != 0 {
+	if allocs := testing.AllocsPerRun(100, func() { c.pollEgress() }); allocs != 0 {
 		t.Errorf("idle pollEgress allocates %v times per call", allocs)
 	}
 }
@@ -181,7 +181,7 @@ func TestClusterEgressShortFrameIsDroppedAndReported(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &errorRecordingListener{}
-			c := &AeronCluster{cfg: ClusterConfig{Listener: l}, state: tc.stage, egressStage: tc.stage}
+			c := &AeronCluster{cfg: ClusterConfig{Listener: l}, state: tc.stage}
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -197,5 +197,63 @@ func TestClusterEgressShortFrameIsDroppedAndReported(t *testing.T) {
 				t.Errorf("errors reported = %v, want one matching ErrCorruptFrame", l.errs)
 			}
 		})
+	}
+}
+
+// A message the cluster sends straight after accepting the session can land
+// in the same poll as the accepting event. It must be delivered, not read as
+// another connect reply and dropped.
+func TestClusterEgressMessageInTheSameBatchAsConnectReply(t *testing.T) {
+	c, pub, l := newEgressTestCluster(StateAwaitConnectReply)
+	c.correlationId = 42
+	c.connectStartMs = time.Now().UnixMilli()
+	c.cfg.ConnectTimeoutMs = int64(time.Hour / time.Millisecond)
+
+	evt := SessionEvent{CorrelationId: 42, ClusterSessionId: 99, LeadershipTermId: 3, Code: EventCodeOK}
+	buf := make([]byte, 512)
+	n := evt.Encode(buf, 0)
+	for _, m := range [][]byte{buf[:n], egressMessage(7, []byte("welcome"))} {
+		if r, err := pub.Offer(m); err != nil || r <= 0 {
+			t.Fatalf("setup offer: %d, %v", r, err)
+		}
+	}
+
+	c.awaitConnectReply()
+
+	if c.State() != StateConnected {
+		t.Fatalf("state = %v, want StateConnected", c.State())
+	}
+	if len(l.messages) != 1 || string(l.messages[0]) != "welcome" {
+		t.Errorf("listener got messages %q, want [welcome]", l.messages)
+	}
+}
+
+// Once a session event closes the session, the rest of the batch belongs to
+// the session that has gone: nothing more is delivered, and the session is
+// not torn down twice.
+func TestClusterEgressBatchAfterSessionClosed(t *testing.T) {
+	c, pub, _ := newEgressTestCluster(StateConnected)
+	l := &errorRecordingListener{}
+	c.cfg.Listener = l
+
+	closed := SessionEvent{ClusterSessionId: 7, Code: EventCodeClosed}
+	buf := make([]byte, 512)
+	n := closed.Encode(buf, 0)
+	for _, m := range [][]byte{buf[:n], egressMessage(1, []byte("late")), buf[:n]} {
+		if r, err := pub.Offer(m); err != nil || r <= 0 {
+			t.Fatalf("setup offer: %d, %v", r, err)
+		}
+	}
+
+	c.pollConnected()
+
+	if len(l.messages) != 0 {
+		t.Errorf("listener got %q after the session closed", l.messages)
+	}
+	if len(l.events) != 1 {
+		t.Errorf("listener got %d session events, want 1", len(l.events))
+	}
+	if len(l.errs) != 1 {
+		t.Errorf("session torn down %d times: %v", len(l.errs), l.errs)
 	}
 }

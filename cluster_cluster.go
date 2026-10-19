@@ -115,8 +115,7 @@ type AeronCluster struct {
 	egressEndedMu sync.Mutex
 	egressEnded   []int32
 	egressEndedN  atomic.Int32
-	egressStage   ClusterState // state the current poll started in
-	egressWork    int          // messages handled by the current poll
+	egressWork    int // messages handled by the current poll
 	ingressPubs   []*Publication
 
 	leaderMemberId    int32
@@ -358,7 +357,7 @@ func (c *AeronCluster) sendConnectRequest() int {
 }
 
 func (c *AeronCluster) awaitConnectReply() int {
-	c.pollEgress(StateAwaitConnectReply)
+	c.pollEgress()
 	workCount := c.egressWork
 
 	if c.state == StateAwaitConnectReply && c.isConnectTimedOut() {
@@ -368,7 +367,7 @@ func (c *AeronCluster) awaitConnectReply() int {
 }
 
 func (c *AeronCluster) pollConnected() int {
-	c.pollEgress(StateConnected)
+	c.pollEgress()
 	workCount := c.egressWork
 
 	nowMs := time.Now().UnixMilli()
@@ -381,7 +380,7 @@ func (c *AeronCluster) pollConnected() int {
 }
 
 func (c *AeronCluster) pollClosing() int {
-	c.pollEgress(StateClosing)
+	c.pollEgress()
 	workCount := c.egressWork
 	c.state = StateClosed
 	return workCount
@@ -398,18 +397,18 @@ func (c *AeronCluster) sendCloseRequest() {
 	}
 }
 
-// pollEgress reads the egress subscription for the state the caller is in.
-// A message longer than one frame arrives as fragments, so everything goes
-// through a FragmentAssembler (Java's AeronCluster does the same) and the
-// handlers only ever see whole messages. The handler is chosen by the state
-// the poll started in, not the state a message leaves behind, so a session
-// event that moves the state does not change how the rest of the batch is read.
-func (c *AeronCluster) pollEgress(stage ClusterState) {
+// pollEgress reads the egress subscription. A message longer than one frame
+// arrives as fragments, so everything goes through a FragmentAssembler (Java's
+// AeronCluster does the same) and the handlers only ever see whole messages.
+// Each message is read for the state the client is in when it arrives, so
+// messages in the same batch after a session event that moves the state are
+// read for the new state: a message after the connect reply is delivered, and
+// nothing after the session closes is.
+func (c *AeronCluster) pollEgress() {
 	if c.egressEndedN.Load() != 0 {
 		c.freeEndedEgressSessions()
 	}
 	c.egressWork = 0
-	c.egressStage = stage
 	c.egressSub.Poll(c.egressFragments, 10)
 }
 
@@ -441,7 +440,7 @@ func (c *AeronCluster) dispatchEgress(buffer []byte, _ *Header) {
 	if len(buffer) < HeaderSize {
 		return
 	}
-	switch c.egressStage {
+	switch c.state {
 	case StateAwaitConnectReply:
 		c.onConnectReplyMessage(buffer)
 	case StateConnected:
