@@ -727,3 +727,83 @@ func TestPublicationCloseReleasesItsLogOnce(t *testing.T) {
 		t.Error("log still mapped after both references were released")
 	}
 }
+
+// newClosablePublication builds a connected publication on a conductor whose
+// Close unmaps its log, as Aeron.Close does.
+func newClosablePublication(t *testing.T) (*Conductor, *Publication, *ManyToOneRingBuffer) {
+	t.Helper()
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	lb, err := c.acquireLog(writeLogFile(t, 64*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lb.Meta().PutInt32Ordered(MetaIsConnectedOff, 1)
+	st := &publicationState{correlationID: 9, registrationID: 9, logBuffers: lb, posLimitCounterID: -1, ready: true}
+	c.publications[9] = st
+	p := newPublication(c, st)
+	if r, err := p.Offer([]byte("before close")); err != nil || r <= 0 {
+		t.Fatalf("setup offer: %d, %v", r, err)
+	}
+	return c, p, toDriver
+}
+
+// Close unmaps the logs of publications the caller has not closed. Offering on
+// one afterwards must report Closed, not write to the unmapped log.
+func TestOfferAfterConductorCloseReturnsClosed(t *testing.T) {
+	c, p, toDriver := newClosablePublication(t)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if p.IsConnected() {
+		t.Error("publication reports connected after Close")
+	}
+	if r, err := p.Offer([]byte("after close")); r != Closed || err != nil {
+		t.Errorf("Offer after Close = %d, %v; want Closed, nil", r, err)
+	}
+	if r, err := p.OfferParts([]byte("after"), []byte("close")); r != Closed || err != nil {
+		t.Errorf("OfferParts after Close = %d, %v; want Closed, nil", r, err)
+	}
+	if _, r, err := p.TryClaim(8); r != Closed || err != nil {
+		t.Errorf("TryClaim after Close = %d, %v; want Closed, nil", r, err)
+	}
+
+	// Closing the publication must not write to the driver through the CnC
+	// file the conductor has closed.
+	tail := toDriver.TailPosition()
+	p.Close()
+	if toDriver.TailPosition() != tail {
+		t.Error("Publication.Close after Conductor.Close wrote to the driver")
+	}
+}
+
+// An offering goroutine sees Closed once another closes the conductor. Run
+// with -race.
+func TestOfferRacingConductorCloseStopsWithClosed(t *testing.T) {
+	c, p, _ := newClosablePublication(t)
+	msg := make([]byte, 64)
+	started := make(chan struct{})
+	done := make(chan int64)
+	go func() {
+		close(started)
+		for {
+			r, err := p.Offer(msg)
+			if err != nil {
+				t.Errorf("Offer: %v", err)
+			}
+			if r == Closed {
+				done <- r
+				return
+			}
+		}
+	}()
+	<-started
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r != Closed {
+		t.Errorf("offering goroutine stopped with %d, want Closed", r)
+	}
+}

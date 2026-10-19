@@ -32,7 +32,11 @@ type Conductor struct {
 	// of the client lock in the Java client. DoWork only try-locks it, so a
 	// poll loop never waits on another goroutine; Close waits for it.
 	workMu sync.Mutex
-	closed bool // guarded by workMu
+
+	// closed is set (under workMu) by Close before it unmaps anything. It is
+	// atomic because publications read it, without workMu, before they touch
+	// their log or the CnC file.
+	closed atomic.Bool
 
 	// logs caches the mapped log files by path, with a reference count per
 	// mapping, as Java's LogBuffers factory does. A publication and the image
@@ -214,10 +218,10 @@ func (c *Conductor) Close() error {
 	// Wait for a DoWork in progress: it reads the mapped CnC file closed below.
 	c.workMu.Lock()
 	defer c.workMu.Unlock()
-	if c.closed {
+	if c.closed.Load() {
 		return nil
 	}
-	c.closed = true
+	c.closed.Store(true)
 
 	c.proxy.ClientClose()
 
@@ -337,7 +341,7 @@ func (c *Conductor) DoWork() int {
 		return 0
 	}
 	defer c.workMu.Unlock()
-	if c.closed {
+	if c.closed.Load() {
 		return 0
 	}
 
@@ -454,9 +458,9 @@ func (c *Conductor) terminate(err error) {
 	}
 }
 
-// isTerminated reports whether the conductor is closed-equivalent.
+// isTerminated reports whether the conductor is closed, or closed-equivalent.
 func (c *Conductor) isTerminated() bool {
-	return c.terminated.Load()
+	return c.terminated.Load() || c.closed.Load()
 }
 
 // FatalError returns the terminal error that closed this conductor (driver

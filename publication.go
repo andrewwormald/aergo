@@ -466,7 +466,8 @@ func (p *Publication) OfferWithBackoff(ctx context.Context, buf []byte, timeout 
 func (p *Publication) IsConnected() bool {
 	// A closed publication's log is unmapped after the linger, so it must not
 	// be read.
-	return !p.closed.Load() && p.logBuffers != nil && p.logBuffers.IsConnected()
+	return !p.closed.Load() && p.logBuffers != nil &&
+		(p.conductor == nil || !p.conductor.closed.Load()) && p.logBuffers.IsConnected()
 }
 
 // StreamID returns the stream identifier.
@@ -480,7 +481,11 @@ func (p *Publication) Close() {
 	if p.closed.CompareAndSwap(false, true) {
 		// A loopback publication has no driver to tell.
 		if p.conductor != nil && p.conductor.proxy != nil {
-			p.conductor.proxy.RemovePublication(p.registrationID)
+			// A closed conductor has told the driver this client is gone,
+			// and its CnC file is unmapped.
+			if !p.conductor.closed.Load() {
+				p.conductor.proxy.RemovePublication(p.registrationID)
+			}
 			p.conductor.lingerPublicationLog(p.state)
 			p.conductor.forgetPublication(p.state)
 		}
