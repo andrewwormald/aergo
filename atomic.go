@@ -63,6 +63,12 @@ func (b *AtomicBuffer) GetInt64(offset int32) int64 {
 	return *(*int64)(b.ptrAt(offset))
 }
 
+// GetInt16 reads a 16-bit field, such as the frame type, without touching the
+// bytes around it.
+func (b *AtomicBuffer) GetInt16(offset int32) int16 {
+	return *(*int16)(b.ptrAt(offset))
+}
+
 func (b *AtomicBuffer) GetUint8(offset int32) uint8 {
 	return *(*uint8)(b.ptrAt(offset))
 }
@@ -83,6 +89,13 @@ func (b *AtomicBuffer) PutInt32(offset int32, value int32) {
 
 func (b *AtomicBuffer) PutInt64(offset int32, value int64) {
 	*(*int64)(b.ptrAt(offset)) = value
+}
+
+// PutInt16 writes a 16-bit field, such as the frame type. Writing it as an
+// int32 would also overwrite the two bytes after it (the low half of the term
+// offset).
+func (b *AtomicBuffer) PutInt16(offset int32, value int16) {
+	*(*int16)(b.ptrAt(offset)) = value
 }
 
 func (b *AtomicBuffer) PutUint8(offset int32, value uint8) {
@@ -107,11 +120,11 @@ func (b *AtomicBuffer) GetInt64Volatile(offset int32) int64 {
 // --- Atomic (ordered) writes ---
 
 func (b *AtomicBuffer) PutInt32Ordered(offset int32, value int32) {
-	atomic.StoreInt32((*int32)(b.ptrAt(offset)), value)
+	storeRelease32((*int32)(b.ptrAt(offset)), value)
 }
 
 func (b *AtomicBuffer) PutInt64Ordered(offset int32, value int64) {
-	atomic.StoreInt64((*int64)(b.ptrAt(offset)), value)
+	storeRelease64((*int64)(b.ptrAt(offset)), value)
 }
 
 // --- CAS ---

@@ -1,6 +1,9 @@
 package aergo
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Offer return codes. Values and semantics match the Java client's
 // io.aeron.Publication constants (io.aeron 1.51.0).
@@ -29,6 +32,45 @@ const (
 	// one added; a larger term buffer length makes this less likely.
 	MaxPositionExceeded int64 = -5
 )
+
+// ErrMessageTooLong is matched (errors.Is) by the *MessageTooLongError an
+// offer or claim returns when the message can never be sent on that
+// publication, however long the caller retries.
+var ErrMessageTooLong = errors.New("message too long")
+
+// ErrCorruptFrame is matched (errors.Is) by the error reported to the error
+// handler when a subscription finds a frame it cannot read: a length shorter
+// than a frame header or longer than the rest of the term. The subscription
+// stops at that frame instead of skipping it, so nothing is silently lost and
+// the publisher is back pressured. A cluster egress message too short for what
+// its header says it holds is dropped and reported with it too, once for a
+// run of them.
+var ErrCorruptFrame = errors.New("corrupt frame")
+
+// MessageTooLongError reports a message longer than the publication allows.
+// Mirrors the IllegalArgumentException Java's Publication.offer and tryClaim
+// throw ("message exceeds maxMessageLength", "claim exceeds
+// maxPayloadLength"), but is returned rather than thrown, and is checked
+// before the offer is attempted, so it does not depend on back pressure.
+type MessageTooLongError struct {
+	// Length is the length of the rejected message (for a claim, the length
+	// requested) in bytes.
+	Length int
+	// Max is the limit it exceeded: Publication.MaxMessageLength for an
+	// offer, Publication.MaxPayloadLength for a claim.
+	Max int
+	// Claim is true when the limit was the claim limit (MaxPayloadLength).
+	Claim bool
+}
+
+func (e *MessageTooLongError) Error() string {
+	if e.Claim {
+		return fmt.Sprintf("claim exceeds maxPayloadLength of %d, length=%d", e.Max, e.Length)
+	}
+	return fmt.Sprintf("message exceeds maxMessageLength of %d, length=%d", e.Max, e.Length)
+}
+
+func (e *MessageTooLongError) Is(target error) bool { return target == ErrMessageTooLong }
 
 // OfferResultName returns the name of an offer result, for logs and errors:
 // "BACK_PRESSURED" for BackPressured, and so on.

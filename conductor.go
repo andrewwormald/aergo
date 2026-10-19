@@ -32,17 +32,59 @@ type Conductor struct {
 	// of the client lock in the Java client. DoWork only try-locks it, so a
 	// poll loop never waits on another goroutine; Close waits for it.
 	workMu sync.Mutex
-	closed bool // guarded by workMu
+
+	// closed is set (under workMu) by Close before it unmaps anything. It is
+	// atomic because publications read it, without workMu, before they touch
+	// their log or the CnC file.
+	closed atomic.Bool
+
+	// afterWork holds the user callbacks (the error handler, an unavailable
+	// image handler) that DoWork found reason to call. DoWork runs them once
+	// it has let go of workMu, so a callback may close the client. Only the
+	// goroutine holding workMu touches it.
+	afterWork []func()
+
+	// logs caches the mapped log files by path, with a reference count per
+	// mapping, as Java's LogBuffers factory does. A publication and the image
+	// of a subscription on the same stream (every IPC stream, and any stream
+	// both sent and received by this client) share one mapping instead of
+	// each faulting in its own copy of the pages.
+	logsMu sync.Mutex
+	logs   map[string]*LogBuffers
+
+	// lingering holds references that are no longer wanted but are kept for
+	// resourceLingerNs first: a goroutine may still be offering to a closed
+	// publication or polling an image that has just gone, and unmapping the log
+	// under it would fault (Java lingers its resources the same way).
+	lingering []lingeringLog
 
 	mu            sync.Mutex
 	publications  map[int64]*publicationState
 	subscriptions map[int64]*subscriptionState
-	errors        []error
+	errors        []error // the most recent maxRecordedErrors
+	errorHandler  func(error)
 	fatalErr      error
+}
+
+// maxRecordedErrors bounds the conductor's list of recent errors.
+const maxRecordedErrors = 64
+
+// resourceLingerNs is how long a released log stays mapped (Java's
+// RESOURCE_LINGER_DURATION_DEFAULT_NS).
+const resourceLingerNs = 3_000_000_000
+
+// closeLinger is how long Close keeps the logs and the CnC file mapped. A
+// variable only so tests need not wait for it.
+var closeLinger = time.Duration(resourceLingerNs)
+
+type lingeringLog struct {
+	lb         *LogBuffers
+	deadlineNs int64
 }
 
 type publicationState struct {
 	correlationID     int64
+	exclusive         bool // added with AddExclusivePublication: one writer, see Publication
 	registrationID    int64
 	channel           string
 	streamID          int32
@@ -55,6 +97,11 @@ type publicationState struct {
 	// err records the driver's rejection (RespOnError) of the add command so
 	// the pending AddPublication/AddExclusivePublication call fails with it.
 	err error
+
+	// logReleased is set by whoever gives up this state's reference to its log
+	// (Publication.Close, or Conductor.Close if it never was), so it is
+	// released exactly once.
+	logReleased atomic.Bool
 }
 
 type subscriptionState struct {
@@ -63,10 +110,27 @@ type subscriptionState struct {
 	streamID        int32
 	channelStatusID int32
 	ready           bool
-	images          []*Image
+	images          []*Image // guarded by Conductor.mu
 	// err records the driver's rejection (RespOnError) of the add command so
 	// the pending AddSubscription call fails with it.
 	err error
+
+	// onUnavailable, if set, is told the session ID of each image that goes
+	// away. Guarded by Conductor.mu.
+	onUnavailable func(sessionID int32)
+
+	// snapshot is an immutable copy of images that Subscription.Poll reads
+	// without taking any lock, as Java's Subscription reads its volatile
+	// image array. It is replaced, never modified, whenever images changes.
+	snapshot atomic.Pointer[[]*Image]
+}
+
+// publishImages makes the current images visible to Poll. The caller holds
+// Conductor.mu (or owns the state exclusively, as a fixture does).
+func (s *subscriptionState) publishImages() {
+	snap := make([]*Image, len(s.images))
+	copy(snap, s.images)
+	s.snapshot.Store(&snap)
 }
 
 // Image represents a subscription's connection to a publication.
@@ -78,6 +142,10 @@ type Image struct {
 	JoinPosition       int64
 	SourceIdentity     string
 	subscriberPosition int64 // current read position (internal)
+
+	// corruptReported is the position (plus one) of the corrupt frame already
+	// reported to the error handler, so a stalled subscriber reports it once.
+	corruptReported int64
 
 	// counterValues is the driver's counter values buffer. The subscriber
 	// position counter at SubscriberPos must be updated on every position
@@ -102,6 +170,11 @@ type Context struct {
 	AeronDir         string
 	DriverTimeoutMs  int64
 	KeepaliveInterMs int64
+
+	// ErrorHandler, if set, is called with errors the client finds but has no
+	// caller to return to: a driver rejection, a log that cannot be mapped, a
+	// corrupt frame, a driver or client timeout. See WithErrorHandler.
+	ErrorHandler func(error)
 }
 
 // DefaultContext returns sensible defaults.
@@ -139,6 +212,7 @@ func NewConductor(cfg Context) (*Conductor, error) {
 		driverTimeoutNs:    cfg.DriverTimeoutMs * 1_000_000,
 		keepaliveInterNs:   cfg.KeepaliveInterMs * 1_000_000,
 		heartbeatCounterId: -1,
+		errorHandler:       cfg.ErrorHandler,
 		publications:       make(map[int64]*publicationState),
 		subscriptions:      make(map[int64]*subscriptionState),
 	}
@@ -149,35 +223,62 @@ func NewConductor(cfg Context) (*Conductor, error) {
 // ClientID returns the unique client identifier.
 func (c *Conductor) ClientID() int64 { return c.clientID }
 
-// Close shuts down the conductor and releases resources.
+// Close shuts down the conductor. Publications report Closed and
+// subscriptions find no images from then on. The logs and the CnC file are
+// unmapped in the background after a linger, so Close does not report an
+// unmap error; it returns nil.
 func (c *Conductor) Close() error {
-	// Wait for a DoWork in progress: it reads the mapped CnC file closed below.
+	// Wait for a DoWork in progress: it reads the CnC file and the state
+	// released below.
 	c.workMu.Lock()
 	defer c.workMu.Unlock()
-	if c.closed {
+	if c.closed.Load() {
 		return nil
 	}
-	c.closed = true
+	c.closed.Store(true)
 
 	c.proxy.ClientClose()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var logs []*LogBuffers
 	for _, pub := range c.publications {
-		if pub.logBuffers != nil {
-			pub.logBuffers.Close()
+		if pub.logBuffers != nil && pub.logReleased.CompareAndSwap(false, true) {
+			logs = append(logs, pub.logBuffers)
 		}
 	}
 	for _, sub := range c.subscriptions {
 		for _, img := range sub.images {
 			if img.LogBuffers != nil {
-				img.LogBuffers.Close()
+				logs = append(logs, img.LogBuffers)
 			}
 		}
+		// Polls from now on find no image, and a later Subscription.Close
+		// finds none to release again.
+		sub.images = nil
+		sub.publishImages()
 	}
+	c.logsMu.Lock()
+	for _, l := range c.lingering {
+		logs = append(logs, l.lb)
+	}
+	c.lingering = nil
+	c.logsMu.Unlock()
 
-	return c.cnc.Close()
+	// Nothing is unmapped yet. Another goroutine may be in an Offer or a Poll
+	// that passed its closed check just before, and a handler may have closed
+	// the client in the middle of a poll that goes on reading the image when
+	// it returns. So the logs and the CnC file linger, as a released log does,
+	// and are unmapped in the background.
+	cnc := c.cnc
+	time.AfterFunc(closeLinger, func() {
+		for _, lb := range logs {
+			c.releaseLog(lb)
+		}
+		_ = cnc.Close()
+	})
+	return nil
 }
 
 // AddPublication requests a new publication from the media driver.
@@ -215,6 +316,7 @@ func (c *Conductor) AddExclusivePublication(channel string, streamID int32) int6
 	c.mu.Lock()
 	c.publications[corrID] = &publicationState{
 		correlationID: corrID,
+		exclusive:     true,
 		channel:       channel,
 		streamID:      streamID,
 	}
@@ -273,8 +375,20 @@ func (c *Conductor) DoWork() int {
 	if !c.workMu.TryLock() {
 		return 0
 	}
-	defer c.workMu.Unlock()
-	if c.closed {
+	workCount := c.doWork()
+	callbacks := c.afterWork
+	c.afterWork = nil
+	c.workMu.Unlock()
+
+	for _, fn := range callbacks {
+		fn()
+	}
+	return workCount
+}
+
+// doWork is DoWork's work, done holding workMu.
+func (c *Conductor) doWork() int {
+	if c.closed.Load() {
 		return 0
 	}
 
@@ -293,6 +407,7 @@ func (c *Conductor) DoWork() int {
 		}
 
 		c.proxy.SendClientKeepalive()
+		c.reapLingering(now)
 
 		if c.heartbeatCounterId < 0 {
 			c.heartbeatCounterId = FindHeartbeatCounter(
@@ -349,21 +464,59 @@ func (c *Conductor) onClientTimeout(msg []byte) {
 	c.terminate(&ClientTimeoutError{})
 }
 
+// addErrorLocked records err, keeping only the most recent ones. The caller
+// holds c.mu.
+func (c *Conductor) addErrorLocked(err error) {
+	if len(c.errors) >= maxRecordedErrors {
+		copy(c.errors, c.errors[1:])
+		c.errors = c.errors[:len(c.errors)-1]
+	}
+	c.errors = append(c.errors, err)
+}
+
+// reportError records err and passes it to the error handler, if there is one
+// (WithErrorHandler; Java's Aeron.Context.errorHandler). The library never logs
+// by itself. The handler runs on the goroutine that found the error, with no
+// lock held, so it may be slow and may close the client. It must not call
+// back into the client in a way that waits on another goroutine.
+func (c *Conductor) reportError(err error) {
+	if h := c.recordError(err); h != nil {
+		h(err)
+	}
+}
+
+// reportErrorAfterWork is reportError for an error DoWork finds: the handler
+// runs when DoWork has let go of workMu.
+func (c *Conductor) reportErrorAfterWork(err error) {
+	if h := c.recordError(err); h != nil {
+		c.afterWork = append(c.afterWork, func() { h(err) })
+	}
+}
+
+// recordError adds err to the recent errors and returns the error handler.
+func (c *Conductor) recordError(err error) func(error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.addErrorLocked(err)
+	return c.errorHandler
+}
+
 // terminate marks the conductor closed-equivalent with the fatal error that
-// caused it. The first terminal error wins; later calls are no-ops.
+// caused it. The first terminal error wins; later calls are no-ops. It is
+// called only by DoWork, which runs the error handler afterwards.
 func (c *Conductor) terminate(err error) {
 	if !c.terminated.CompareAndSwap(false, true) {
 		return
 	}
 	c.mu.Lock()
 	c.fatalErr = err
-	c.errors = append(c.errors, err)
 	c.mu.Unlock()
+	c.reportErrorAfterWork(err)
 }
 
-// isTerminated reports whether the conductor is closed-equivalent.
+// isTerminated reports whether the conductor is closed, or closed-equivalent.
 func (c *Conductor) isTerminated() bool {
-	return c.terminated.Load()
+	return c.terminated.Load() || c.closed.Load()
 }
 
 // FatalError returns the terminal error that closed this conductor (driver
@@ -404,6 +557,111 @@ func (c *Conductor) checkDriverLiveness(nowMs int64) error {
 	return nil
 }
 
+// acquireLog returns the mapping of a log file, mapping it on first use. Each
+// call must be paired with a releaseLog.
+func (c *Conductor) acquireLog(path string) (*LogBuffers, error) {
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	if lb := c.logs[path]; lb != nil {
+		lb.refs++
+		return lb, nil
+	}
+	lb, err := MapLogBuffers(path)
+	if err != nil {
+		return nil, err
+	}
+	lb.path, lb.refs = path, 1
+	if c.logs == nil {
+		c.logs = make(map[string]*LogBuffers)
+	}
+	c.logs[path] = lb
+	return lb, nil
+}
+
+// releaseLog drops one reference to a mapping from acquireLog and unmaps it
+// with the last. A mapping that did not come from acquireLog is closed.
+func (c *Conductor) releaseLog(lb *LogBuffers) {
+	if lb == nil {
+		return
+	}
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	c.releaseLogLocked(lb)
+}
+
+func (c *Conductor) releaseLogLocked(lb *LogBuffers) {
+	if lb.path != "" && c.logs[lb.path] == lb {
+		if lb.refs--; lb.refs > 0 {
+			return
+		}
+		delete(c.logs, lb.path)
+	}
+	lb.Close()
+}
+
+// lingerLog gives up a reference, but only really releases it after
+// resourceLingerNs.
+func (c *Conductor) lingerLog(lb *LogBuffers) {
+	if lb == nil {
+		return
+	}
+	c.logsMu.Lock()
+	c.lingering = append(c.lingering, lingeringLog{lb: lb, deadlineNs: time.Now().UnixNano() + resourceLingerNs})
+	c.logsMu.Unlock()
+}
+
+// abandonAdd drops the state of an add that failed (timed out, or rejected),
+// so a reply that arrives later is not adopted, and releases whatever a reply
+// that raced the failure brought with it.
+func (c *Conductor) abandonAdd(corrID int64) {
+	c.mu.Lock()
+	pub := c.publications[corrID]
+	delete(c.publications, corrID)
+	c.mu.Unlock()
+	if pub != nil && pub.logBuffers != nil && pub.logReleased.CompareAndSwap(false, true) {
+		c.releaseLog(pub.logBuffers)
+	}
+	c.releaseSubscription(corrID)
+}
+
+// forgetPublication drops the state of a closed publication. Without this the
+// map grows by one entry for every publication ever added.
+func (c *Conductor) forgetPublication(st *publicationState) {
+	if st == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.publications[st.correlationID] == st {
+		delete(c.publications, st.correlationID)
+	}
+	c.mu.Unlock()
+}
+
+// lingerPublicationLog gives up a publication's reference to its log, once.
+func (c *Conductor) lingerPublicationLog(st *publicationState) {
+	if st != nil && st.logBuffers != nil && st.logReleased.CompareAndSwap(false, true) {
+		c.lingerLog(st.logBuffers)
+	}
+}
+
+// reapLingering releases the references whose linger has run out.
+func (c *Conductor) reapLingering(nowNs int64) {
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	kept := c.lingering[:0]
+	for _, l := range c.lingering {
+		if nowNs >= l.deadlineNs {
+			c.releaseLogLocked(l.lb)
+		} else {
+			kept = append(kept, l)
+		}
+	}
+	for i := len(kept); i < len(c.lingering); i++ {
+		c.lingering[i] = lingeringLog{}
+	}
+	c.lingering = kept
+}
+
 func (c *Conductor) onNewPublication(msg []byte) {
 	if len(msg) < 36 {
 		return
@@ -429,30 +687,38 @@ func (c *Conductor) onNewPublication(msg []byte) {
 		logFile = string(msg[36 : 36+logFileLen])
 	}
 
+	// Map the log before publishing the state. FindPublication returns the
+	// state as soon as it is ready, and a caller racing with this handler
+	// (DoWork on another goroutine) would otherwise build a Publication whose
+	// log buffers are still nil: it never connects and every offer says Closed.
+	var lb *LogBuffers
+	var mapErr error
+	if logFile != "" {
+		lb, mapErr = c.acquireLog(logFile)
+	}
+
 	c.mu.Lock()
-	pub := c.publications[corrID]
-	if pub != nil {
+	adopted := false
+	// Only a pending add that has no log yet takes the mapping. A reply for an
+	// add that is gone (it timed out) or a duplicate reply must not keep it.
+	if pub := c.publications[corrID]; pub != nil && pub.logBuffers == nil {
 		pub.registrationID = regID
 		pub.sessionID = sessionID
 		pub.posLimitCounterID = posLimitID
 		pub.channelStatusID = channelStatusID
 		pub.logBuffersPath = logFile
-		pub.ready = true
+		if mapErr != nil {
+			pub.err = fmt.Errorf("map log buffers %s: %w", logFile, mapErr)
+		} else {
+			pub.logBuffers = lb
+			pub.ready = true
+			adopted = true
+		}
 	}
 	c.mu.Unlock()
 
-	if logFile != "" {
-		lb, err := MapLogBuffers(logFile)
-		c.mu.Lock()
-		if pub != nil {
-			if err != nil {
-				pub.err = fmt.Errorf("map log buffers %s: %w", logFile, err)
-				pub.ready = false
-			} else {
-				pub.logBuffers = lb
-			}
-		}
-		c.mu.Unlock()
+	if lb != nil && !adopted {
+		c.releaseLog(lb)
 	}
 }
 
@@ -522,8 +788,11 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 		joinPos = counterValues.GetInt64Volatile(subPosID * CounterValueLength)
 	}
 
-	lb, err := MapLogBuffers(logFile)
+	lb, err := c.acquireLog(logFile)
 	if err != nil {
+		// Without the log the image cannot be read, and the subscription would
+		// silently never see this publication.
+		c.reportErrorAfterWork(fmt.Errorf("map log buffers %s for subscription %d: %w", logFile, subRegID, err))
 		return
 	}
 
@@ -542,31 +811,73 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	sub := c.subscriptions[subRegID]
 	if sub != nil {
 		sub.images = append(sub.images, img)
+		sub.publishImages()
 	}
 	c.mu.Unlock()
+
+	// The subscription was closed (or never existed): nobody will use the image.
+	if sub == nil {
+		c.releaseLog(lb)
+	}
 }
 
+// releaseSubscription is called when the client closes a subscription. The
+// driver does not report the images of a closed subscription as unavailable,
+// so their logs are released here (after the linger, in case a goroutine is
+// still polling) and the state is dropped, so an image that arrives late is
+// released too. Java's Subscription.close does the same.
+func (c *Conductor) releaseSubscription(registrationID int64) {
+	c.mu.Lock()
+	sub := c.subscriptions[registrationID]
+	delete(c.subscriptions, registrationID)
+	var images []*Image
+	if sub != nil {
+		images = sub.images
+		sub.images = nil
+		sub.publishImages()
+	}
+	c.mu.Unlock()
+
+	for _, img := range images {
+		c.lingerLog(img.LogBuffers)
+	}
+}
+
+// onUnavailableImage handles RespOnUnavailableImage: the driver has dropped an
+// image (its publication went away). Message layout
+// (io.aeron.command.ImageMessageFlyweight):
+//
+//	offset 0:  correlationID                int64  (the image)
+//	offset 8:  subscriptionRegistrationID   int64
+//	offset 16: streamID                     int32
+//	offset 20: channel length + channel
 func (c *Conductor) onUnavailableImage(msg []byte) {
-	if len(msg) < 24 {
+	if len(msg) < 20 {
 		return
 	}
 	corrID := int64(binary.LittleEndian.Uint64(msg[0:]))
-	subRegID := int64(binary.LittleEndian.Uint64(msg[16:]))
+	subRegID := int64(binary.LittleEndian.Uint64(msg[8:]))
 
+	var handler func(sessionID int32)
+	var sessionID int32
 	c.mu.Lock()
 	sub := c.subscriptions[subRegID]
 	if sub != nil {
 		for i, img := range sub.images {
 			if img.CorrelationID == corrID {
-				if img.LogBuffers != nil {
-					img.LogBuffers.Close()
-				}
+				c.lingerLog(img.LogBuffers)
 				sub.images = append(sub.images[:i], sub.images[i+1:]...)
+				sub.publishImages()
+				handler, sessionID = sub.onUnavailable, img.SessionID
 				break
 			}
 		}
 	}
 	c.mu.Unlock()
+
+	if handler != nil {
+		c.afterWork = append(c.afterWork, func() { handler(sessionID) })
+	}
 }
 
 // onError handles RespOnError: the driver rejected a command. The error is
@@ -601,6 +912,6 @@ func (c *Conductor) onError(msg []byte) {
 	if sub := c.subscriptions[corrID]; sub != nil {
 		sub.err = err
 	}
-	c.errors = append(c.errors, err)
 	c.mu.Unlock()
+	c.reportErrorAfterWork(err)
 }

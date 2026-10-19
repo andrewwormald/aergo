@@ -2,6 +2,12 @@ package aergo
 
 // EgressListener receives messages from the Aeron cluster.
 type EgressListener interface {
+	// OnMessage delivers an application message from the cluster as
+	// buffer[offset:offset+length]. As in the Java client, buffer is a view into
+	// the log buffer (or the reassembly buffer for a fragmented message), not a
+	// copy: it is valid only until OnMessage returns and must not be modified or
+	// retained. Copy what you need to keep, for example before handing it to
+	// another goroutine.
 	OnMessage(cluster Cluster, timestamp int64, buffer []byte, offset int, length int)
 	OnSessionEvent(cluster Cluster, event *SessionEvent)
 	OnNewLeader(cluster Cluster, event *NewLeaderEvent)

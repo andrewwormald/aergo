@@ -67,8 +67,10 @@ func runCluster(aeronDir, endpoint string) {
 
 		if cc.State() == aergo.StateConnected {
 			msg := []byte("hello cluster from aergo")
-			result := cc.Offer(msg)
-			if result > 0 {
+			result, err := cc.Offer(msg)
+			if err != nil {
+				log.Printf("offer failed: %v", err)
+			} else if result > 0 {
 				log.Printf("sent to cluster: position=%d", result)
 			}
 			time.Sleep(time.Second)

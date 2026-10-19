@@ -34,7 +34,7 @@ client, err := aergo.Connect(aergo.WithDir("/dev/shm/aeron-user"))
 
 // Create a publication
 pub, err := client.AddPublication("aeron:udp?endpoint=localhost:40123", 1001)
-pub.Offer([]byte("hello"))
+pos, err := pub.Offer([]byte("hello")) // pos < 0: NotConnected, BackPressured, ... (retry/react)
 
 // Create a subscription
 sub, err := client.AddSubscription("aeron:udp?endpoint=localhost:40123", 1001)
@@ -55,8 +55,33 @@ cc.Connect()
 for cc.State() != aergo.StateConnected {
     cc.Poll()
 }
-cc.Offer([]byte("hello cluster"))
+pos, err := cc.Offer([]byte("hello cluster"))
 ```
+
+### Shared and exclusive publications
+
+`AddPublication` gives a publication any number of goroutines may offer to at once. `AddExclusivePublication` gives one that only a single goroutine may offer to at a time (as Java's `ExclusivePublication`): it is a little faster, because it reserves space in the log without an atomic add, but two goroutines offering together would corrupt the log. The cluster client uses exclusive publications for ingress, so drive an `AeronCluster` from one goroutine.
+
+### Message size
+
+`Offer` follows the Java client. A message longer than one frame (`pub.MaxPayloadLength()`, the MTU minus the 32-byte header) is split into fragments, so wrap your handler in a `FragmentAssembler` to receive it whole. One longer than `pub.MaxMessageLength()` (an eighth of the term length, at most 16 MiB) can never be sent: `Offer` returns a `*MessageTooLongError` (`errors.Is(err, aergo.ErrMessageTooLong)`) and writes nothing.
+
+The returned position is separate from the error. Back pressure and similar conditions are negative positions with a nil error, as in Java, so a retry loop stays cheap; the error is only for a message that cannot be sent however often you retry.
+
+### Errors with no caller to return to
+
+The library never logs. Errors found while the client works in the background (a driver rejection, a log that cannot be mapped, a corrupt frame, a driver timeout) go to a handler you supply, as with Java's `Aeron.Context.errorHandler`. For the cluster client they go to `EgressListener.OnError`.
+
+```go
+client, err := aergo.Connect(
+    aergo.WithDir("/dev/shm/aeron-user"),
+    aergo.WithErrorHandler(func(err error) { log.Printf("aeron: %v", err) }),
+)
+```
+
+## Supported platforms
+
+Linux on **amd64** and **arm64**, both tested natively in CI. The client reads and writes the driver's memory-mapped files directly, so it relies on the log's little-endian layout; big-endian targets fail to build. On amd64 the release store that commits a frame is a two-instruction assembly routine; on arm64 it is Go's own atomic store, which compiles to the same single `STLR` instruction Java uses. `-tags aergo_noasm` forces the pure-Go store on amd64.
 
 ## Building the Media Driver
 
@@ -103,7 +128,7 @@ Log Buffer Files (per publication/subscription)
 └── Metadata            → tail positions, connection status
 ```
 
-Data-plane reads and writes use `sync/atomic` directly on the mmap'd shared memory. `Publication.Offer` is fully lock-free; `Subscription.Poll` takes a brief `sync.Mutex` only to snapshot the image set published by the conductor, then iterates and reads from each term buffer lock-free.
+Data-plane reads and writes use `sync/atomic` directly on the mmap'd shared memory (the one exception is the release store on amd64, a plain `MOV` in `atomic_store_amd64.s`). `Publication.Offer` and `Subscription.Poll` are both lock-free: the conductor publishes an immutable snapshot of a subscription's images, which `Poll` reads without taking a lock, and hands the handler a view straight into the term buffer.
 
 ## Tests
 

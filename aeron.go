@@ -39,6 +39,15 @@ func WithDir(dir string) ContextOption {
 	return func(ctx *Context) { ctx.AeronDir = dir }
 }
 
+// WithErrorHandler sets a function called with errors the client finds but has
+// no caller to return to: a driver rejection, a log that cannot be mapped, a
+// corrupt frame, a driver or client timeout. It mirrors Java's
+// Aeron.Context.errorHandler. The library never logs by itself; without a
+// handler these errors are only kept (the most recent few) and not visible.
+func WithErrorHandler(fn func(error)) ContextOption {
+	return func(ctx *Context) { ctx.ErrorHandler = fn }
+}
+
 // NewClient creates a new Aeron client connected to the media driver.
 func Connect(opts ...ContextOption) (*Aeron, error) {
 	cfg := DefaultContext()
@@ -70,16 +79,26 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 // conductor (the driver timed out this client) or a stale driver heartbeat
 // means the wait could never succeed.
 func (c *Aeron) preAddCheck() error {
+	if c.conductor.closed.Load() {
+		return errClientClosed
+	}
 	if err := c.conductor.FatalError(); err != nil {
 		return err
 	}
 	return c.conductor.checkDriverLiveness(time.Now().UnixMilli())
 }
 
+// errClientClosed fails an Add* on a client that is closed, or that is closed
+// while the Add* waits (by an error handler, say).
+var errClientClosed = errors.New("aeron client is closed")
+
 // awaitError reports the first error that should abort a pending Add* wait:
-// a driver rejection of the command (RespOnError) or a terminal client
-// error (driver/client timeout).
+// a driver rejection of the command (RespOnError), a terminal client error
+// (driver/client timeout), or the client being closed.
 func (c *Aeron) awaitError(corrID int64) error {
+	if c.conductor.closed.Load() {
+		return errClientClosed
+	}
 	if err := c.conductor.pendingError(corrID); err != nil {
 		return err
 	}
@@ -87,6 +106,8 @@ func (c *Aeron) awaitError(corrID int64) error {
 }
 
 // AddPublication creates a publication for the given channel and stream.
+// The returned publication is shared: any number of goroutines may offer to it
+// at once. For one writer goroutine, AddExclusivePublication is faster.
 func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, error) {
 	if err := c.preAddCheck(); err != nil {
 		return nil, err
@@ -101,6 +122,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -109,6 +131,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("publication timeout")
 }
 
@@ -120,6 +143,11 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 //
 // On the driver side this is a different command (CmdAddExclusivePublication)
 // but the response and Publication type are identical to AddPublication.
+//
+// In exchange for the private log, only one goroutine may offer to the
+// returned publication at a time. That is what lets it reserve space without
+// an atomic read-modify-write (see Publication); use AddPublication when
+// several goroutines send.
 func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
 	if err := c.preAddCheck(); err != nil {
 		return nil, err
@@ -134,6 +162,7 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -142,6 +171,7 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("exclusive publication timeout")
 }
 
@@ -160,6 +190,7 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindSubscription(corrID); state != nil {
@@ -168,6 +199,7 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("subscription timeout")
 }
 

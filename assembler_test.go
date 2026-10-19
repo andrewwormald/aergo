@@ -25,12 +25,12 @@ func TestFragmentAssemblerMultiFragment(t *testing.T) {
 		t.Fatal("should not deliver on begin fragment")
 	}
 
-	assembler.OnFragment([]byte("lo "), &Header{Flags: 0, SessionID: 1})
+	assembler.OnFragment([]byte("lo "), &Header{Flags: 0, SessionID: 1, TermOffset: 64})
 	if received != nil {
 		t.Fatal("should not deliver on middle fragment")
 	}
 
-	assembler.OnFragment([]byte("world"), &Header{Flags: FlagEndFrag, SessionID: 1})
+	assembler.OnFragment([]byte("world"), &Header{Flags: FlagEndFrag, SessionID: 1, TermOffset: 128})
 	if string(received) != "hello world" {
 		t.Errorf("got %q, want %q", received, "hello world")
 	}
@@ -44,8 +44,8 @@ func TestFragmentAssemblerMultipleSessions(t *testing.T) {
 
 	assembler.OnFragment([]byte("A1"), &Header{Flags: FlagBeginFrag, SessionID: 1})
 	assembler.OnFragment([]byte("B1"), &Header{Flags: FlagBeginFrag, SessionID: 2})
-	assembler.OnFragment([]byte("A2"), &Header{Flags: FlagEndFrag, SessionID: 1})
-	assembler.OnFragment([]byte("B2"), &Header{Flags: FlagEndFrag, SessionID: 2})
+	assembler.OnFragment([]byte("A2"), &Header{Flags: FlagEndFrag, SessionID: 1, TermOffset: 64})
+	assembler.OnFragment([]byte("B2"), &Header{Flags: FlagEndFrag, SessionID: 2, TermOffset: 64})
 
 	if results[1] != "A1A2" {
 		t.Errorf("session 1: got %q", results[1])
@@ -67,5 +67,155 @@ func TestFragmentAssemblerOrphanFragment(t *testing.T) {
 
 	if called {
 		t.Error("orphan fragments should not be delivered")
+	}
+}
+
+// The buffer handed to the delegate is reused for the next message of the
+// session, so reassembly settles to no allocation once it has grown.
+func TestFragmentAssemblerSteadyStateDoesNotAllocate(t *testing.T) {
+	var delivered int
+	a := NewFragmentAssembler(func([]byte, *Header) { delivered++ })
+	chunk := make([]byte, 1376)
+	begin := &Header{SessionID: 1, Flags: FlagBeginFrag}
+	mid := &Header{SessionID: 1, Flags: 0, TermOffset: 1408}
+	end := &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 2816}
+	send := func() {
+		a.OnFragment(chunk, begin)
+		a.OnFragment(chunk, mid)
+		a.OnFragment(chunk, end)
+	}
+	send() // grow the buffer
+
+	if allocs := testing.AllocsPerRun(100, send); allocs != 0 {
+		t.Errorf("steady-state reassembly allocates %v times per message", allocs)
+	}
+	if delivered == 0 {
+		t.Fatal("nothing delivered")
+	}
+}
+
+// A new begin fragment discards a message whose end never arrived, and does not
+// leak its bytes into the next one.
+func TestFragmentAssemblerBeginDropsUnfinishedMessage(t *testing.T) {
+	var got []string
+	a := NewFragmentAssembler(func(b []byte, _ *Header) { got = append(got, string(b)) })
+	a.OnFragment([]byte("lost-"), &Header{SessionID: 1, Flags: FlagBeginFrag})
+	a.OnFragment([]byte("ab"), &Header{SessionID: 1, Flags: FlagBeginFrag, TermOffset: 64})
+	a.OnFragment([]byte("cd"), &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 128})
+	if len(got) != 1 || got[0] != "abcd" {
+		t.Errorf("got %q, want [abcd]", got)
+	}
+}
+
+// An end fragment arriving after a message completed is an orphan, not the
+// start of another delivery.
+func TestFragmentAssemblerOrphanEndAfterCompletion(t *testing.T) {
+	n := 0
+	a := NewFragmentAssembler(func([]byte, *Header) { n++ })
+	a.OnFragment([]byte("a"), &Header{SessionID: 1, Flags: FlagBeginFrag})
+	a.OnFragment([]byte("b"), &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 64})
+	a.OnFragment([]byte("c"), &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 128})
+	if n != 1 {
+		t.Errorf("delivered %d messages, want 1", n)
+	}
+}
+
+func TestFragmentAssemblerFreeSessionBuffer(t *testing.T) {
+	n := 0
+	a := NewFragmentAssembler(func([]byte, *Header) { n++ })
+	a.OnFragment([]byte("a"), &Header{SessionID: 1, Flags: FlagBeginFrag})
+	a.FreeSessionBuffer(1)
+	a.OnFragment([]byte("b"), &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 64})
+	if n != 0 {
+		t.Errorf("delivered %d messages after the session buffer was freed, want 0", n)
+	}
+	// And the session is usable again afterwards.
+	a.OnFragment([]byte("x"), &Header{SessionID: 1, Flags: FlagBeginFrag, TermOffset: 128})
+	a.OnFragment([]byte("y"), &Header{SessionID: 1, Flags: FlagEndFrag, TermOffset: 192})
+	if n != 1 {
+		t.Errorf("session not usable after FreeSessionBuffer: delivered %d", n)
+	}
+}
+
+// fragmentAt returns the header of a fragment at termOffset, and the offset
+// of the frame that follows it.
+func fragmentAt(termOffset int32, flags uint8, payload string) (*Header, int32) {
+	return &Header{SessionID: 1, Flags: flags, TermOffset: termOffset},
+		termOffset + align(DataFrameHeaderLen+int32(len(payload)), FrameAlignment)
+}
+
+func collectingAssembler() (*FragmentAssembler, *[]string) {
+	var got []string
+	return NewFragmentAssembler(func(b []byte, _ *Header) { got = append(got, string(b)) }), &got
+}
+
+// A fragment that does not start where the previous one ended means frames
+// were missed; the two must not be stitched together.
+func TestFragmentAssemblerDropsFragmentAfterGap(t *testing.T) {
+	a, got := collectingAssembler()
+	h, _ := fragmentAt(0, FlagBeginFrag, "AAAA")
+	a.OnFragment([]byte("AAAA"), h)
+	h, _ = fragmentAt(4000, FlagEndFrag, "CCCC")
+	a.OnFragment([]byte("CCCC"), h)
+	if len(*got) != 0 {
+		t.Errorf("delivered %q across a gap", *got)
+	}
+}
+
+// An end fragment with no begin is dropped, even straight after a session
+// starts.
+func TestFragmentAssemblerDropsEndWithoutBegin(t *testing.T) {
+	a, got := collectingAssembler()
+	h, _ := fragmentAt(1024, FlagEndFrag, "tail")
+	a.OnFragment([]byte("tail"), h)
+	if len(*got) != 0 {
+		t.Errorf("delivered %q from an end fragment with no begin", *got)
+	}
+}
+
+// A half-built message left behind (an image that went away mid-message with
+// its session ID reused, say) must not have the middle of an unrelated
+// message stitched onto it; and a new begin still starts cleanly.
+func TestFragmentAssemblerStaleHalfMessage(t *testing.T) {
+	a, got := collectingAssembler()
+	h, _ := fragmentAt(0, FlagBeginFrag, "OLD-")
+	a.OnFragment([]byte("OLD-"), h)
+
+	// The new image joins mid-message, somewhere else in the term.
+	h, _ = fragmentAt(8192, FlagEndFrag, "-tail-of-other-message")
+	a.OnFragment([]byte("-tail-of-other-message"), h)
+	if len(*got) != 0 {
+		t.Fatalf("delivered %q from a stale half message", *got)
+	}
+
+	h, next := fragmentAt(8256, FlagBeginFrag, "new-")
+	a.OnFragment([]byte("new-"), h)
+	h, _ = fragmentAt(next, FlagEndFrag, "message")
+	a.OnFragment([]byte("message"), h)
+	if len(*got) != 1 || (*got)[0] != "new-message" {
+		t.Errorf("got %q, want [new-message]", *got)
+	}
+}
+
+// A message in contiguous fragments is delivered once, with a header that
+// describes the whole message.
+func TestFragmentAssemblerContiguousFragmentsHeader(t *testing.T) {
+	var got []string
+	var hdr Header
+	a := NewFragmentAssembler(func(b []byte, h *Header) { got = append(got, string(b)); hdr = *h })
+	const begin = int32(4096)
+	h, next := fragmentAt(begin, FlagBeginFrag, "hel")
+	a.OnFragment([]byte("hel"), h)
+	h, next = fragmentAt(next, 0, "lo ")
+	a.OnFragment([]byte("lo "), h)
+	h, _ = fragmentAt(next, FlagEndFrag, "world")
+	a.OnFragment([]byte("world"), h)
+
+	if len(got) != 1 || got[0] != "hello world" {
+		t.Fatalf("got %q, want [hello world]", got)
+	}
+	if hdr.FrameLength != DataFrameHeaderLen+11 || hdr.Flags != FlagUnfrag || hdr.TermOffset != begin {
+		t.Errorf("header: length %d flags %#x offset %d, want %d %#x %d",
+			hdr.FrameLength, hdr.Flags, hdr.TermOffset, DataFrameHeaderLen+11, FlagUnfrag, begin)
 	}
 }

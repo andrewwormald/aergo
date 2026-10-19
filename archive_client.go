@@ -112,7 +112,7 @@ func (c ArchiveConfig) withDefaults() (ArchiveConfig, error) {
 // realArchiveAeron); tests substitute fakes so no driver is needed.
 type archivePublication interface {
 	IsConnected() bool
-	OfferWithBackoff(ctx context.Context, buf []byte, timeout time.Duration) int64
+	OfferWithBackoff(ctx context.Context, buf []byte, timeout time.Duration) (int64, error)
 	Close()
 }
 
@@ -315,8 +315,10 @@ func (a *Archive) awaitPublicationConnected(ctx context.Context) error {
 
 // offer sends one encoded request, retrying while the publication is busy.
 func (a *Archive) offer(ctx context.Context, buf []byte) error {
-	result := a.pub.OfferWithBackoff(ctx, buf, a.cfg.MessageTimeout)
+	result, err := a.pub.OfferWithBackoff(ctx, buf, a.cfg.MessageTimeout)
 	switch {
+	case err != nil:
+		return fmt.Errorf("aergo: archive request offer failed: %w", err)
 	case result >= 0:
 		return nil
 	case result == NotConnected:
@@ -435,7 +437,7 @@ func (a *Archive) Close() error {
 	req.Encode(buf, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	a.pub.OfferWithBackoff(ctx, buf, time.Second)
+	_, _ = a.pub.OfferWithBackoff(ctx, buf, time.Second)
 
 	a.pub.Close()
 	a.sub.Close()

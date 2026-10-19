@@ -1,6 +1,9 @@
 package aergo
 
-import "sync/atomic"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
 // Header contains parsed information from a received message frame.
 type Header struct {
@@ -15,6 +18,11 @@ type Header struct {
 }
 
 // FragmentHandler is called for each received message fragment.
+//
+// As in the Java client, buffer is a view into the log buffer, not a copy: it
+// is valid only until the handler returns, and the handler must not modify or
+// retain it. Copy what you need to keep. header is likewise only valid for the
+// call.
 type FragmentHandler func(buffer []byte, header *Header)
 
 // Subscription receives messages from one or more publications via images.
@@ -26,6 +34,7 @@ type FragmentHandler func(buffer []byte, header *Header)
 // called from any goroutine.
 type Subscription struct {
 	conductor      *Conductor
+	state          *subscriptionState
 	channel        string
 	streamID       int32
 	registrationID int64
@@ -34,13 +43,13 @@ type Subscription struct {
 	// Scratch reused across fragments, owned by the polling goroutine.
 	// Both are handed to the handler, which is why the contract above
 	// says they are only valid for the duration of the call.
-	payloadScratch []byte
-	headerScratch  Header
+	headerScratch Header
 }
 
 func newSubscription(conductor *Conductor, corrID int64, state *subscriptionState) *Subscription {
 	return &Subscription{
 		conductor:      conductor,
+		state:          state,
 		channel:        state.channel,
 		streamID:       state.streamID,
 		registrationID: corrID,
@@ -54,22 +63,16 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		return 0
 	}
 
-	state := s.conductor.FindSubscription(s.registrationID)
-	if state == nil {
+	// Lock-free: the conductor publishes a fresh immutable slice whenever an
+	// image comes or goes, so polling never contends with other pollers or
+	// with the conductor.
+	snap := s.state.snapshot.Load()
+	if snap == nil {
 		return 0
 	}
 
-	// Snapshot under the lock, then iterate outside it. Appending into
-	// the retained scratch reuses its capacity instead of allocating a
-	// new slice on every poll.
-	s.conductor.mu.Lock()
-	images := make([]*Image, len(state.images))
-	copy(images, state.images)
-	s.conductor.mu.Unlock()
-
 	totalFragments := 0
-
-	for _, img := range images {
+	for _, img := range *snap {
 		if img.LogBuffers == nil {
 			continue
 		}
@@ -77,64 +80,92 @@ func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) int {
 		if remaining <= 0 {
 			break
 		}
-
-		termLen := img.LogBuffers.TermLength()
-		shift := numberOfTrailingZeros(uint32(termLen))
-		initialTermID := img.LogBuffers.InitialTermID()
-
-		position := img.subscriberPosition
-		termID := initialTermID + int32(position>>shift)
-		termOffset := int32(position) & (termLen - 1)
-		partIndex := int((termID - initialTermID) % PartitionCount)
-		term := img.LogBuffers.Term(partIndex)
-
-		fragments, newOffset := ReadTerm(term, termOffset, func(buf *AtomicBuffer, offset, length int32, hdr *DataFrameHeader) {
-			// Reuse the buffer and header across fragments rather than
-			// allocating a pair per message. Both are only valid for the
-			// duration of the handler call, which is the contract Aeron
-			// itself has and what every consumer here already assumes -
-			// they decode or copy before returning.
-			if cap(s.payloadScratch) < int(length) {
-				// Grow with slack rather than to the exact size, so a
-				// stream of increasing payloads settles instead of
-				// reallocating on each new high-water mark.
-				grown := 2 * cap(s.payloadScratch)
-				if grown < int(length) {
-					grown = int(length)
-				}
-				s.payloadScratch = make([]byte, grown)
-			}
-			payload := s.payloadScratch[:length]
-			buf.GetBytes(offset, payload)
-
-			alignedFrame := align(hdr.FrameLength, DataFrameHeaderLen)
-			pos := computePosition(hdr.TermID, hdr.TermOffset+alignedFrame, termLen, initialTermID)
-
-			s.headerScratch = Header{
-				FrameLength:   hdr.FrameLength,
-				Flags:         hdr.Flags,
-				SessionID:     hdr.SessionID,
-				StreamID:      hdr.StreamID,
-				TermID:        hdr.TermID,
-				TermOffset:    hdr.TermOffset,
-				ReservedValue: hdr.ReservedValue,
-				Position:      pos,
-			}
-			handler(payload, &s.headerScratch)
-		}, remaining)
-
-		// Advance even when only padding was consumed (fragments == 0 but
-		// the offset moved) so the reader can cross a term boundary. Every
-		// advance is also published to the driver's subscriber position
-		// counter so flow control does not stall the publication.
-		if newOffset > termOffset {
-			img.updatePosition(computePosition(termID, newOffset, termLen, initialTermID))
-		}
-
-		totalFragments += fragments
+		totalFragments += s.pollImage(img, handler, remaining)
 	}
 
 	return totalFragments
+}
+
+// pollImage reads up to limit fragments from one image. It is the same walk of
+// the term as ReadTerm, written out so the hot path is one loop with no
+// closure and no intermediate header: a handler call per fragment, straight
+// from the log. Java's Image.poll / TermReader.read do the same.
+func (s *Subscription) pollImage(img *Image, handler FragmentHandler, limit int) int {
+	lb := img.LogBuffers
+	termLen := lb.TermLength()
+	shift := numberOfTrailingZeros(uint32(termLen))
+	initialTermID := lb.InitialTermID()
+
+	position := img.subscriberPosition
+	termID := initialTermID + int32(position>>shift)
+	termOffset := int32(position) & (termLen - 1)
+	term := lb.Term(int((termID - initialTermID) % PartitionCount))
+	capacity := term.Capacity()
+	termStart := position - int64(termOffset) // stream position of this term's first byte
+
+	offset := termOffset
+	fragments := 0
+	for fragments < limit && offset < capacity {
+		frameLen := term.GetInt32Volatile(offset + FrameLengthOffset)
+		if frameLen <= 0 {
+			break // no more committed frames
+		}
+		if frameLen < DataFrameHeaderLen || int64(offset)+int64(frameLen) > int64(capacity) {
+			// A committed length no frame can have. Skipping it would lose
+			// whatever it covers without a trace and probably misread what
+			// follows, so stop here (the publisher is back pressured, as
+			// for any reader that stops) and say so, once per frame.
+			if at := termStart + int64(offset); img.corruptReported != at+1 {
+				img.corruptReported = at + 1
+				s.conductor.reportError(fmt.Errorf("%w: length %d at position %d (session %d, stream %d)",
+					ErrCorruptFrame, frameLen, at, img.SessionID, s.streamID))
+			}
+			break
+		}
+		aligned := align(frameLen, DataFrameHeaderLen)
+
+		if term.GetInt16(offset+FrameTypeOffset) != FrameTypePadding {
+			// The handler gets a view straight into the log, as Java's
+			// FragmentHandler does, so the payload is not copied unless the
+			// handler copies it. The header is reused across fragments. Both
+			// are valid only for the duration of the call.
+			s.headerScratch = Header{
+				FrameLength:   frameLen,
+				Flags:         term.GetUint8(offset + FrameFlagsOffset),
+				SessionID:     term.GetInt32(offset + FrameSessionIDOff),
+				StreamID:      term.GetInt32(offset + FrameStreamIDOff),
+				TermID:        term.GetInt32(offset + FrameTermIDOff),
+				TermOffset:    term.GetInt32(offset + FrameTermOffsetOff),
+				ReservedValue: term.GetInt64(offset + FrameReservedValueOff),
+				Position:      termStart + int64(offset) + int64(aligned),
+			}
+			handler(term.Slice(offset+DataFrameHeaderLen, frameLen-DataFrameHeaderLen), &s.headerScratch)
+			fragments++
+		}
+
+		offset += aligned
+	}
+
+	// Advance even when only padding was consumed (fragments == 0 but the
+	// offset moved) so the reader can cross a term boundary. Every advance is
+	// also published to the driver's subscriber position counter so flow
+	// control does not stall the publication.
+	if offset > termOffset {
+		img.updatePosition(position + int64(offset-termOffset))
+	}
+
+	return fragments
+}
+
+// SetUnavailableImageHandler registers fn to be called with the session ID of
+// each image of this subscription that goes away, because its publication
+// closed (Java's UnavailableImageHandler). It is called on the goroutine that
+// runs the client's DoWork, not the one that polls, so it must hand the session
+// over rather than touch state the poller owns.
+func (s *Subscription) SetUnavailableImageHandler(fn func(sessionID int32)) {
+	s.conductor.mu.Lock()
+	s.state.onUnavailable = fn
+	s.conductor.mu.Unlock()
 }
 
 // StreamID returns the stream identifier.
@@ -143,9 +174,14 @@ func (s *Subscription) StreamID() int32 { return s.streamID }
 // Close releases the subscription.
 func (s *Subscription) Close() {
 	if s.closed.CompareAndSwap(false, true) {
-		// A loopback subscription has no driver to tell.
-		if s.conductor != nil && s.conductor.proxy != nil {
-			s.conductor.proxy.RemoveSubscription(s.registrationID)
+		if s.conductor != nil {
+			// A loopback subscription has no driver to tell. A closed
+			// conductor has told the driver this client is gone, and its CnC
+			// file is unmapped.
+			if s.conductor.proxy != nil && !s.conductor.closed.Load() {
+				s.conductor.proxy.RemoveSubscription(s.registrationID)
+			}
+			s.conductor.releaseSubscription(s.registrationID)
 		}
 	}
 }

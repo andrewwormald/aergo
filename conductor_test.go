@@ -171,12 +171,7 @@ func TestOnUnavailableImage(t *testing.T) {
 		},
 	}
 
-	msg := make([]byte, 24)
-	binary.LittleEndian.PutUint64(msg[0:], uint64(10)) // correlationID of image
-	binary.LittleEndian.PutUint64(msg[8:], uint64(0))
-	binary.LittleEndian.PutUint64(msg[16:], uint64(subRegID))
-
-	c.onUnavailableImage(msg)
+	c.onUnavailableImage(unavailableImageReply(10, subRegID))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -384,7 +379,7 @@ func TestOnClientTimeout(t *testing.T) {
 		lb := newInMemLogBuffers(offerTestTermLen)
 		pub := newInMemPublication(lb, 7, 1001)
 		pub.conductor = c
-		if got := pub.Offer(make([]byte, 8)); got != Closed {
+		if got, _ := pub.Offer(make([]byte, 8)); got != Closed {
 			t.Errorf("Offer after client timeout: got %d, want Closed", got)
 		}
 	})
@@ -448,7 +443,7 @@ func TestDoWorkTerminatesOnStaleDriverHeartbeat(t *testing.T) {
 	lb := newInMemLogBuffers(offerTestTermLen)
 	pub := newInMemPublication(lb, 7, 1001)
 	pub.conductor = c
-	if got := pub.Offer(make([]byte, 8)); got != Closed {
+	if got, _ := pub.Offer(make([]byte, 8)); got != Closed {
 		t.Errorf("Offer after driver timeout: got %d, want Closed", got)
 	}
 }
@@ -560,5 +555,433 @@ func TestConductorCloseRacesWithDoWorkSafely(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// A publication must not be visible as ready before its log buffers are
+// mapped. FindPublication is polled from another goroutine while the driver's
+// reply is handled, as when DoWork runs in the background during AddPublication.
+func TestOnNewPublicationReadyImpliesLogBuffers(t *testing.T) {
+	const termLen = 64 * 1024
+	logFile := filepath.Join(t.TempDir(), "pub.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*termLen+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 200; i++ {
+		c := &Conductor{
+			publications:  make(map[int64]*publicationState),
+			subscriptions: make(map[int64]*subscriptionState),
+		}
+		const corrID = int64(42)
+		c.publications[corrID] = &publicationState{correlationID: corrID}
+
+		msg := make([]byte, 36+len(logFile))
+		binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))
+		binary.LittleEndian.PutUint32(msg[32:], uint32(len(logFile)))
+		copy(msg[36:], logFile)
+
+		// Look at the log buffers the instant the state is first seen ready,
+		// not afterwards, when the handler has long finished.
+		unmapped := make(chan bool, 1)
+		go func() {
+			for {
+				if st := c.FindPublication(corrID); st != nil {
+					c.mu.Lock()
+					unmapped <- st.logBuffers == nil
+					c.mu.Unlock()
+					return
+				}
+			}
+		}()
+		c.onNewPublication(msg)
+
+		if <-unmapped {
+			t.Fatalf("iteration %d: publication was ready before its log buffers were mapped", i)
+		}
+		c.publications[corrID].logBuffers.Close()
+	}
+}
+
+func TestOnNewPublicationMapFailureIsNotReady(t *testing.T) {
+	c := &Conductor{
+		publications:  make(map[int64]*publicationState),
+		subscriptions: make(map[int64]*subscriptionState),
+	}
+	const corrID = int64(7)
+	c.publications[corrID] = &publicationState{correlationID: corrID}
+
+	missing := filepath.Join(t.TempDir(), "absent.logbuffer")
+	msg := make([]byte, 36+len(missing))
+	binary.LittleEndian.PutUint64(msg[0:], uint64(corrID))
+	binary.LittleEndian.PutUint32(msg[32:], uint32(len(missing)))
+	copy(msg[36:], missing)
+	c.onNewPublication(msg)
+
+	if c.FindPublication(corrID) != nil {
+		t.Error("publication whose log could not be mapped is reported ready")
+	}
+	if c.pendingError(corrID) == nil {
+		t.Error("map failure not recorded against the pending add")
+	}
+}
+
+// A publication and the image of a subscription on the same stream use the
+// same log file; the client maps it once and unmaps it when both are done.
+func TestLogBuffersAreSharedAndReferenceCounted(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "shared.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+
+	a, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatal("the same log file was mapped twice")
+	}
+
+	c.releaseLog(a)
+	if a.data == nil {
+		t.Fatal("log unmapped while a reference was still held")
+	}
+	c.releaseLog(b)
+	if a.data != nil {
+		t.Error("log still mapped after the last reference was released")
+	}
+	if len(c.logs) != 0 {
+		t.Errorf("cache still holds %d entries", len(c.logs))
+	}
+
+	// After the last release a new acquire maps afresh.
+	d, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == a {
+		t.Error("a released mapping was handed out again")
+	}
+	c.releaseLog(d)
+}
+
+// A log whose reference is given up stays mapped for the linger period, so a
+// goroutine still using it does not fault, and is unmapped after.
+func TestLingeringLogIsUnmappedOnlyAfterTheLinger(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "linger.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+	lb, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.lingerLog(lb)
+	c.reapLingering(time.Now().UnixNano())
+	if lb.data == nil {
+		t.Fatal("log unmapped before its linger ran out")
+	}
+	// Still usable.
+	_ = lb.Term(0).GetInt32(0)
+
+	c.reapLingering(time.Now().UnixNano() + resourceLingerNs + 1)
+	if lb.data != nil {
+		t.Error("log still mapped after its linger ran out")
+	}
+	if len(c.lingering) != 0 {
+		t.Errorf("%d entries still lingering", len(c.lingering))
+	}
+}
+
+// Closing a publication gives up its reference once; closing the conductor
+// afterwards must not release it again.
+func TestPublicationCloseReleasesItsLogOnce(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "pub.logbuffer")
+	if err := os.WriteFile(logFile, make([]byte, 3*64*1024+LogMetaDataLength), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Conductor{}
+	lb, err := c.acquireLog(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := c.acquireLog(logFile) // e.g. the image of a subscription on the same stream
+	st := &publicationState{logBuffers: lb}
+
+	c.lingerPublicationLog(st)
+	c.lingerPublicationLog(st) // a second Close or Conductor.Close must be a no-op
+	c.reapLingering(time.Now().UnixNano() + resourceLingerNs + 1)
+
+	if lb.data == nil {
+		t.Fatal("log unmapped while the image still held it: the publication released twice")
+	}
+	c.releaseLog(other)
+	if lb.data != nil {
+		t.Error("log still mapped after both references were released")
+	}
+}
+
+// newClosablePublication builds a connected publication on a conductor whose
+// Close unmaps its log, as Aeron.Close does.
+func newClosablePublication(t *testing.T) (*Conductor, *Publication, *ManyToOneRingBuffer) {
+	t.Helper()
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	lb, err := c.acquireLog(writeLogFile(t, 64*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lb.Meta().PutInt32Ordered(MetaIsConnectedOff, 1)
+	st := &publicationState{correlationID: 9, registrationID: 9, logBuffers: lb, posLimitCounterID: -1, ready: true}
+	c.publications[9] = st
+	p := newPublication(c, st)
+	if r, err := p.Offer([]byte("before close")); err != nil || r <= 0 {
+		t.Fatalf("setup offer: %d, %v", r, err)
+	}
+	return c, p, toDriver
+}
+
+// Close unmaps the logs of publications the caller has not closed. Offering on
+// one afterwards must report Closed, not write to the unmapped log.
+func TestOfferAfterConductorCloseReturnsClosed(t *testing.T) {
+	c, p, toDriver := newClosablePublication(t)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if p.IsConnected() {
+		t.Error("publication reports connected after Close")
+	}
+	if r, err := p.Offer([]byte("after close")); r != Closed || err != nil {
+		t.Errorf("Offer after Close = %d, %v; want Closed, nil", r, err)
+	}
+	if r, err := p.OfferParts([]byte("after"), []byte("close")); r != Closed || err != nil {
+		t.Errorf("OfferParts after Close = %d, %v; want Closed, nil", r, err)
+	}
+	if _, r, err := p.TryClaim(8); r != Closed || err != nil {
+		t.Errorf("TryClaim after Close = %d, %v; want Closed, nil", r, err)
+	}
+
+	// Closing the publication must not write to the driver through the CnC
+	// file the conductor has closed.
+	tail := toDriver.TailPosition()
+	p.Close()
+	if toDriver.TailPosition() != tail {
+		t.Error("Publication.Close after Conductor.Close wrote to the driver")
+	}
+}
+
+// An offering goroutine sees Closed once another closes the conductor. Run
+// with -race.
+func TestOfferRacingConductorCloseStopsWithClosed(t *testing.T) {
+	c, p, _ := newClosablePublication(t)
+	msg := make([]byte, 64)
+	started := make(chan struct{})
+	done := make(chan int64)
+	go func() {
+		close(started)
+		for {
+			r, err := p.Offer(msg)
+			if err != nil {
+				t.Errorf("Offer: %v", err)
+			}
+			if r == Closed {
+				done <- r
+				return
+			}
+		}
+	}()
+	<-started
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r != Closed {
+		t.Errorf("offering goroutine stopped with %d, want Closed", r)
+	}
+}
+
+// newClosableSubscription builds a subscription with one image on a
+// conductor whose Close unmaps the image's log, as Aeron.Close does.
+func newClosableSubscription(t *testing.T) (*Conductor, *Subscription, *ManyToOneRingBuffer) {
+	t.Helper()
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	lb, err := c.acquireLog(writeLogFile(t, 64*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &subscriptionState{correlationID: 5, streamID: 1, ready: true,
+		images: []*Image{{SessionID: 1, LogBuffers: lb, SubscriberPos: -1}}}
+	st.publishImages()
+	c.subscriptions[5] = st
+	return c, newSubscription(c, 5, st), toDriver
+}
+
+// Close releases the image logs of subscriptions the caller has not closed.
+// Polling or closing one afterwards must not touch the unmapped log or CnC
+// file, nor release the logs a second time.
+func TestSubscriptionAfterConductorClose(t *testing.T) {
+	c, sub, toDriver := newClosableSubscription(t)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := sub.Poll(func([]byte, *Header) {}, 10); n != 0 {
+		t.Errorf("Poll after Close read %d fragments", n)
+	}
+	tail := toDriver.TailPosition()
+	sub.Close()
+	if toDriver.TailPosition() != tail {
+		t.Error("Subscription.Close after Conductor.Close wrote to the driver")
+	}
+	if len(c.lingering) != 0 {
+		t.Errorf("Subscription.Close after Conductor.Close released %d logs again", len(c.lingering))
+	}
+}
+
+// A handler may close the client while a poll is under way (a cluster
+// listener closing the cluster, say). The poll goes on reading the image
+// after the handler returns, so the log must still be mapped.
+func TestConductorCloseFromInsidePollHandler(t *testing.T) {
+	c, sub, _ := newClosableSubscription(t)
+	img := (*sub.state.snapshot.Load())[0]
+	pub := newInMemPublication(img.LogBuffers, 1, 1)
+	pub.logBuffers.Meta().PutInt32Ordered(MetaIsConnectedOff, 1)
+	for i := 0; i < 3; i++ {
+		if r, err := pub.Offer([]byte("message")); err != nil || r <= 0 {
+			t.Fatalf("setup offer %d: %d, %v", i, r, err)
+		}
+	}
+
+	n := sub.Poll(func([]byte, *Header) {
+		if err := c.Close(); err != nil {
+			t.Error(err)
+		}
+	}, 10)
+	if n != 3 {
+		t.Errorf("Poll read %d fragments, want 3", n)
+	}
+}
+
+// Close keeps the logs mapped through the linger, then unmaps them.
+func TestConductorCloseUnmapsLogsAfterLinger(t *testing.T) {
+	defer func(d time.Duration) { closeLinger = d }(closeLinger)
+	closeLinger = 20 * time.Millisecond
+
+	c, _, _ := newClosablePublication(t)
+	mapped := func() int {
+		c.logsMu.Lock()
+		defer c.logsMu.Unlock()
+		return len(c.logs)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if mapped() != 1 {
+		t.Fatal("log unmapped at once by Close")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mapped() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("log still mapped long after the linger")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The error handler may close the client, as a cluster listener closing the
+// cluster from OnError does. Errors found inside DoWork used to reach it
+// while DoWork held the lock Close waits for.
+func TestErrorHandlerMayCloseTheClient(t *testing.T) {
+	c, bcast := newInMemConductor(42)
+	var got []error
+	c.errorHandler = func(err error) {
+		got = append(got, err)
+		_ = c.Close()
+	}
+	bcast.transmit(RespOnClientTimeout, binary.LittleEndian.AppendUint64(nil, 42))
+
+	done := make(chan struct{})
+	go func() {
+		c.DoWork()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DoWork deadlocked: the error handler could not close the client")
+	}
+	if len(got) != 1 || !errors.As(got[0], new(*ClientTimeoutError)) {
+		t.Errorf("handler got %v, want one ClientTimeoutError", got)
+	}
+	if !c.closed.Load() {
+		t.Error("client not closed")
+	}
+}
+
+// Adding to a closed client fails at once, without touching the CnC file,
+// which is unmapped once the close linger is over.
+func TestAddAfterCloseFails(t *testing.T) {
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	a := &Aeron{conductor: c}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tail := toDriver.TailPosition()
+
+	start := time.Now()
+	if _, err := a.AddSubscription("aeron:ipc", 1); err == nil {
+		t.Error("AddSubscription on a closed client succeeded")
+	}
+	if time.Since(start) > time.Second {
+		t.Errorf("AddSubscription on a closed client took %v", time.Since(start))
+	}
+	if toDriver.TailPosition() != tail {
+		t.Error("AddSubscription on a closed client wrote to the driver")
+	}
+}
+
+// An add that fails (timed out, or rejected by the driver) leaves no pending
+// state behind, and a reply that arrives after it gave up maps nothing.
+func TestFailedAddLeavesNoState(t *testing.T) {
+	defer PublicationWaitTimeoutForTesting(PublicationWaitTimeoutForTesting(50 * time.Millisecond))
+	c, bcast := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	a := &Aeron{conductor: c}
+
+	corrID := toDriver.NextCorrelationID() + 1
+	if _, err := a.AddPublication("aeron:ipc", 1); err == nil {
+		t.Fatal("AddPublication with no driver reply succeeded")
+	}
+	if len(c.publications) != 0 {
+		t.Errorf("%d publication states left by a timed-out add", len(c.publications))
+	}
+	c.onNewPublication(publicationReply(corrID, writeLogFile(t, 64*1024)))
+	if len(c.logs) != 0 || len(c.publications) != 0 {
+		t.Errorf("late reply kept %d logs and %d publication states", len(c.logs), len(c.publications))
+	}
+
+	corrID = toDriver.NextCorrelationID() + 1
+	reject := binary.LittleEndian.AppendUint64(nil, uint64(corrID))
+	reject = binary.LittleEndian.AppendUint32(reject, 1)
+	reject = binary.LittleEndian.AppendUint32(reject, 0)
+	bcast.transmit(RespOnError, reject)
+	if _, err := a.AddSubscription("aeron:ipc", 1); err == nil {
+		t.Fatal("rejected AddSubscription succeeded")
+	}
+	if len(c.subscriptions) != 0 {
+		t.Errorf("%d subscription states left by a rejected add", len(c.subscriptions))
 	}
 }

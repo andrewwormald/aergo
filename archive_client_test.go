@@ -62,7 +62,7 @@ type fakeArchivePub struct {
 
 func (p *fakeArchivePub) IsConnected() bool { return p.connected }
 
-func (p *fakeArchivePub) OfferWithBackoff(_ context.Context, buf []byte, _ time.Duration) int64 {
+func (p *fakeArchivePub) OfferWithBackoff(_ context.Context, buf []byte, _ time.Duration) (int64, error) {
 	p.mu.Lock()
 	cp := append([]byte(nil), buf...)
 	p.sent = append(p.sent, cp)
@@ -71,7 +71,7 @@ func (p *fakeArchivePub) OfferWithBackoff(_ context.Context, buf []byte, _ time.
 	if hook != nil {
 		hook(cp)
 	}
-	return int64(len(buf))
+	return int64(len(buf)), nil
 }
 
 func (p *fakeArchivePub) Close() { p.closed = true }

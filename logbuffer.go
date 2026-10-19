@@ -31,6 +31,18 @@ const (
 	FlagEndFrag   = 0x40
 	FlagUnfrag    = FlagBeginFrag | FlagEndFrag
 
+	// FrameAlignment is the alignment of every frame in a term, in bytes.
+	FrameAlignment = 32
+
+	// DefaultMtuLength is the Aeron default MTU, used for a log whose
+	// metadata carries no (or an unusable) MTU, which only hand-built logs
+	// do: the media driver always sets it.
+	DefaultMtuLength = 1408
+
+	// MaxMessageLengthCap is the largest message a publication accepts
+	// whatever its term length (Java FrameDescriptor.MAX_MESSAGE_LENGTH).
+	MaxMessageLengthCap = 16 * 1024 * 1024
+
 	// Metadata offsets within the log metadata section.
 	// Fields are padded to cache-line boundaries (PADDING_SIZE=64).
 	// Matches Java LogBufferDescriptor exactly.
@@ -47,12 +59,37 @@ const (
 	MetaPageSizeOff        = 280 // int32
 )
 
+// computeMaxMessageLength is the largest message a publication with the given
+// term length accepts (Java FrameDescriptor.computeMaxMessageLength): an
+// eighth of the term, capped at MaxMessageLengthCap.
+func computeMaxMessageLength(termLen int32) int32 {
+	return min(termLen>>3, MaxMessageLengthCap)
+}
+
+// computeFragmentedFrameLength is the number of term bytes a message of the
+// given length occupies once split into frames carrying at most
+// maxPayloadLength bytes each (Java LogBufferDescriptor.
+// computeFragmentedFrameLength).
+func computeFragmentedFrameLength(length, maxPayloadLength int32) int32 {
+	full := length / maxPayloadLength
+	last := int32(0)
+	if rem := length % maxPayloadLength; rem > 0 {
+		last = align(rem+DataFrameHeaderLen, FrameAlignment)
+	}
+	return full*(maxPayloadLength+DataFrameHeaderLen) + last
+}
+
 // LogBuffers represents a memory-mapped log buffer file.
 type LogBuffers struct {
 	data    []byte
 	termLen int32
 	terms   [PartitionCount]*AtomicBuffer
 	meta    *AtomicBuffer
+
+	// path and refs are managed by the Conductor's log cache: one mapping of
+	// a log file is shared by the publication and the images that use it.
+	path string
+	refs int
 
 	// heapData holds a hard reference to a heap-allocated backing array for
 	// loopback (non-mmap'd) instances built via NewLoopbackLogBuffers, so the
@@ -223,10 +260,10 @@ func (a *TermAppender) Append(
 	}
 
 	// Write frame header
-	a.term.PutInt32(termOffset+FrameLengthOffset, 0) // uncommitted
+	a.term.PutInt32Ordered(termOffset+FrameLengthOffset, 0) // uncommitted; read atomically by Poll
 	a.term.PutUint8(termOffset+FrameVersionOffset, 0)
 	a.term.PutUint8(termOffset+FrameFlagsOffset, FlagUnfrag)
-	a.term.PutInt32(termOffset+FrameTypeOffset, FrameTypeData)
+	a.term.PutInt16(termOffset+FrameTypeOffset, FrameTypeData)
 	a.term.PutInt32(termOffset+FrameTermOffsetOff, termOffset)
 	a.term.PutInt32(termOffset+FrameSessionIDOff, sessionID)
 	a.term.PutInt32(termOffset+FrameStreamIDOff, streamID)
@@ -261,31 +298,34 @@ type DataFrameHeader struct {
 
 // ReadTerm reads messages from a term buffer starting at the given offset.
 // Returns (fragmentsRead, newOffset).
+//
+// It stops at a committed frame length no frame can have (shorter than a
+// frame header, or past the end of the term), as Subscription.Poll does, and
+// returns the offset of that frame.
 func ReadTerm(
 	term *AtomicBuffer,
 	termOffset int32,
 	handler TermFragmentHandler,
 	fragmentLimit int,
 ) (int, int32) {
+	// Its address is passed to the handler, so it escapes: one allocation
+	// per call.
+	var hdr DataFrameHeader
 	fragmentsRead := 0
 	offset := termOffset
 	capacity := term.Capacity()
-
-	// Declared outside the loop and reused. Its address is passed to the
-	// handler, so it escapes whatever we do - but escaping once per call
-	// rather than once per fragment is the difference between no garbage
-	// and garbage proportional to throughput. The handler may only use
-	// it for the duration of the call, which is Aeron's contract.
-	var hdr DataFrameHeader
 
 	for fragmentsRead < fragmentLimit && offset < capacity {
 		frameLen := term.GetInt32Volatile(offset + FrameLengthOffset)
 		if frameLen <= 0 {
 			break // no more committed frames
 		}
+		if frameLen < DataFrameHeaderLen || int64(offset)+int64(frameLen) > int64(capacity) {
+			break // corrupt length
+		}
 
 		alignedLen := align(frameLen, DataFrameHeaderLen)
-		frameType := int16(term.GetInt32(offset + FrameTypeOffset))
+		frameType := term.GetInt16(offset + FrameTypeOffset)
 
 		if frameType != int16(FrameTypePadding) {
 			hdr = DataFrameHeader{

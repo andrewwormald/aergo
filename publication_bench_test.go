@@ -16,7 +16,7 @@ func BenchmarkPublicationOffer(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if pub.Offer(payload) < 0 {
+				if r, _ := pub.Offer(payload); r < 0 {
 					b.StopTimer()
 					resetLogBufferToGenesis(lb, termLen)
 					b.StartTimer()
@@ -46,7 +46,7 @@ func BenchmarkPublicationOffer_BuildThenSend(b *testing.B) {
 				for j := range buf {
 					buf[j] = byte(j)
 				}
-				if pub.Offer(buf) < 0 {
+				if r, _ := pub.Offer(buf); r < 0 {
 					b.StopTimer()
 					resetLogBufferToGenesis(lb, termLen)
 					b.StartTimer()
@@ -70,7 +70,7 @@ func BenchmarkPublicationTryClaim(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				claim, pos := pub.TryClaim(size)
+				claim, pos, _ := pub.TryClaim(size)
 				if pos < 0 {
 					b.StopTimer()
 					resetLogBufferToGenesis(lb, termLen)

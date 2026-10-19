@@ -47,12 +47,11 @@ func TestPoll_HandlerSeesItsOwnFragment(t *testing.T) {
 	}
 }
 
-// TestPoll_RetainedBufferIsOverwritten documents the hazard the
-// contract exists to prevent. A handler that keeps the slice instead of
-// copying sees it change under it. This is the behaviour Aeron has, and
-// the test is here so the consequence is written down rather than
-// discovered.
-func TestPoll_RetainedBufferIsOverwritten(t *testing.T) {
+// TestPoll_PayloadIsAViewIntoTheLog pins the contract the handler is given,
+// which is the Java client's: the payload is not a copy but the log's own
+// memory, valid only for the call, so the handler must copy what it keeps. The
+// header, by contrast, is one struct reused for every fragment.
+func TestPoll_PayloadIsAViewIntoTheLog(t *testing.T) {
 	termLen := int32(64 * 1024)
 	lb := newInMemLogBuffers(termLen)
 	app := NewTermAppender(lb, 0)
@@ -70,58 +69,46 @@ func TestPoll_RetainedBufferIsOverwritten(t *testing.T) {
 	if len(retained) != 2 {
 		t.Fatalf("got %d fragments, want 2", len(retained))
 	}
-	if !bytes.HasPrefix(retained[1], []byte("second-fragment")) {
-		t.Fatalf("second fragment = %q, want it to start with second-fragment", retained[1])
+	if !bytes.Equal(retained[0], []byte("first-fragment")) || !bytes.Equal(retained[1], []byte("second-fragment")) {
+		t.Fatalf("payloads = %q, %q", retained[0], retained[1])
 	}
-	// The retained slices alias one buffer, so the first now reads as
-	// the second. If this ever stops being true the contract has
-	// loosened and the doc should say so.
-	if bytes.HasPrefix(retained[0], []byte("first-fragment")) {
-		t.Log("retained buffers did not alias; reuse is not observable here")
-	} else {
-		t.Logf("confirmed: retained buffer was overwritten (now %q) — handlers must copy", retained[0])
+
+	// Changing the log changes what was handed out: it is a view, not a copy.
+	lb.Term(0).PutBytes(DataFrameHeaderLen, []byte("FIRST"))
+	if !bytes.HasPrefix(retained[0], []byte("FIRST")) {
+		t.Errorf("payload did not follow the log (%q): it was copied", retained[0])
 	}
+
 	if retainedHeaders[0] != retainedHeaders[1] {
-		t.Log("headers did not alias")
-	} else {
-		t.Log("confirmed: retained headers alias one struct — handlers must copy")
+		t.Error("headers are distinct structs; they are meant to be reused across fragments")
 	}
 }
 
-// TestPoll_ScratchGrowthSettles covers a stream of increasing payload
-// sizes. Growing to the exact size would reallocate at every new
-// high-water mark; growing with slack has to settle instead.
-func TestPoll_ScratchGrowthSettles(t *testing.T) {
-	termLen := int32(1024 * 1024)
-	lb := newInMemLogBuffers(termLen)
+// TestPoll_DoesNotCopyPayloads: polling large payloads allocates nothing and
+// the cost does not grow with the payload.
+func TestPoll_DoesNotCopyPayloads(t *testing.T) {
+	lb := newInMemLogBuffers(1024 * 1024)
 	app := NewTermAppender(lb, 0)
-
-	const frames = 40
-	for i := 1; i <= frames; i++ {
-		app.Append(0, 1, 1001, make([]byte, i*16)) // steadily larger
-	}
+	app.Append(0, 1, 1001, make([]byte, 8000))
 	sub := newInMemSubscription(lb, 1001)
+	img := sub.state.images[0]
 
-	grows := 0
-	lastCap := 0
-	sub.Poll(func(buf []byte, h *Header) {
-		if c := cap(sub.payloadScratch); c != lastCap {
-			grows++
-			lastCap = c
-		}
-	}, frames)
-
-	// Doubling from nothing to 640 bytes is a handful of steps, not one
-	// per fragment.
-	if grows > 12 {
-		t.Errorf("scratch grew %d times over %d increasing payloads; growth is not settling", grows, frames)
+	n := 0
+	allocs := testing.AllocsPerRun(50, func() {
+		img.subscriberPosition = 0
+		n += sub.Poll(func(buf []byte, h *Header) {}, 1)
+	})
+	if allocs != 0 {
+		t.Errorf("Poll of an 8000 byte payload allocates %v times", allocs)
 	}
-	t.Logf("grew %d times over %d fragments, final cap %d", grows, frames, lastCap)
+	if n == 0 {
+		t.Fatal("nothing polled")
+	}
 }
 
-// TestPoll_HandlesPayloadLargerThanScratch is the boundary the growth
-// path exists for.
-func TestPoll_HandlesPayloadLargerThanScratch(t *testing.T) {
+// TestPoll_HandlesLargePayload checks a payload much larger than the one
+// before it arrives intact.
+func TestPoll_HandlesLargePayload(t *testing.T) {
 	termLen := int32(1024 * 1024)
 	lb := newInMemLogBuffers(termLen)
 	app := NewTermAppender(lb, 0)
@@ -151,7 +138,7 @@ func TestPoll_HandlesPayloadLargerThanScratch(t *testing.T) {
 	}
 	for i := range large {
 		if got[1][i] != large[i] {
-			t.Fatalf("second fragment differs at byte %d after the scratch grew", i)
+			t.Fatalf("second fragment differs at byte %d ", i)
 		}
 	}
 }

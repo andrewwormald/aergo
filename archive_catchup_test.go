@@ -313,7 +313,7 @@ func TestArchiveCatchUpEndToEndOverLoopbackStreams(t *testing.T) {
 	f.replaySubscription = NewLoopbackSubscription(replayLB, 4201)
 
 	offer := func(p *Publication, k int64) {
-		if r := p.Offer(testFrame(k).payload); r <= 0 {
+		if r, _ := p.Offer(testFrame(k).payload); r <= 0 {
 			t.Fatalf("offer frame %d: %d", k, r)
 		}
 	}
