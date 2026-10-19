@@ -274,13 +274,21 @@ func (c *AeronCluster) createEgressSubscription() int {
 		c.cfg.Listener.OnError(c, fmt.Errorf("create egress subscription: %w", err))
 		return 0
 	}
+	c.useEgressSubscription(sub)
+	c.state = StateAwaitSubscriptionConnected
+	return 1
+}
+
+// useEgressSubscription reads egress from sub, with fresh reassembly state.
+func (c *AeronCluster) useEgressSubscription(sub *Subscription) {
 	c.egressSub = sub
 	c.egressAssembler = NewFragmentAssembler(c.dispatchEgress)
 	c.egressFragments = c.egressAssembler.OnFragment
+	c.egressEndedMu.Lock()
+	c.egressEnded = nil // sessions of the old subscription
 	c.egressEndedN.Store(0)
+	c.egressEndedMu.Unlock()
 	sub.SetUnavailableImageHandler(c.onEgressImageUnavailable)
-	c.state = StateAwaitSubscriptionConnected
-	return 1
 }
 
 func (c *AeronCluster) awaitSubscriptionConnected() int {

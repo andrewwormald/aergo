@@ -257,3 +257,21 @@ func TestClusterEgressBatchAfterSessionClosed(t *testing.T) {
 		t.Errorf("session torn down %d times: %v", len(l.errs), l.errs)
 	}
 }
+
+// A session that ended on the old egress subscription is not freed on the new
+// one, where the same session ID may be live.
+func TestClusterEgressNewSubscriptionForgetsEndedSessions(t *testing.T) {
+	c, _, _ := newEgressTestCluster(StateConnected)
+	c.onEgressImageUnavailable(1) // queued, never freed: the client reconnects
+
+	_, sub, _ := newFragPair(fragTestTermLen)
+	c.useEgressSubscription(sub)
+	c.egressAssembler.OnFragment(make([]byte, 100), &Header{SessionID: 1, Flags: FlagBeginFrag})
+
+	c.onEgressImageUnavailable(2) // another session ends
+	c.pollEgress()
+
+	if c.egressAssembler.builders[1] == nil {
+		t.Error("live session 1 on the new subscription was freed for an image of the old one")
+	}
+}
