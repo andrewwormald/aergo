@@ -807,3 +807,43 @@ func TestOfferRacingConductorCloseStopsWithClosed(t *testing.T) {
 		t.Errorf("offering goroutine stopped with %d, want Closed", r)
 	}
 }
+
+// newClosableSubscription builds a subscription with one image on a
+// conductor whose Close unmaps the image's log, as Aeron.Close does.
+func newClosableSubscription(t *testing.T) (*Conductor, *Subscription, *ManyToOneRingBuffer) {
+	t.Helper()
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	lb, err := c.acquireLog(writeLogFile(t, 64*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &subscriptionState{correlationID: 5, streamID: 1, ready: true,
+		images: []*Image{{SessionID: 1, LogBuffers: lb, SubscriberPos: -1}}}
+	st.publishImages()
+	c.subscriptions[5] = st
+	return c, newSubscription(c, 5, st), toDriver
+}
+
+// Close releases the image logs of subscriptions the caller has not closed.
+// Polling or closing one afterwards must not touch the unmapped log or CnC
+// file, nor release the logs a second time.
+func TestSubscriptionAfterConductorClose(t *testing.T) {
+	c, sub, toDriver := newClosableSubscription(t)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := sub.Poll(func([]byte, *Header) {}, 10); n != 0 {
+		t.Errorf("Poll after Close read %d fragments", n)
+	}
+	tail := toDriver.TailPosition()
+	sub.Close()
+	if toDriver.TailPosition() != tail {
+		t.Error("Subscription.Close after Conductor.Close wrote to the driver")
+	}
+	if len(c.lingering) != 0 {
+		t.Errorf("Subscription.Close after Conductor.Close released %d logs again", len(c.lingering))
+	}
+}

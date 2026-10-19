@@ -175,8 +175,10 @@ func (s *Subscription) StreamID() int32 { return s.streamID }
 func (s *Subscription) Close() {
 	if s.closed.CompareAndSwap(false, true) {
 		if s.conductor != nil {
-			// A loopback subscription has no driver to tell.
-			if s.conductor.proxy != nil {
+			// A loopback subscription has no driver to tell. A closed
+			// conductor has told the driver this client is gone, and its CnC
+			// file is unmapped.
+			if s.conductor.proxy != nil && !s.conductor.closed.Load() {
 				s.conductor.proxy.RemoveSubscription(s.registrationID)
 			}
 			s.conductor.releaseSubscription(s.registrationID)

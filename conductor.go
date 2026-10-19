@@ -239,6 +239,10 @@ func (c *Conductor) Close() error {
 				c.releaseLog(img.LogBuffers)
 			}
 		}
+		// Polls from now on find no image, and a later Subscription.Close
+		// finds none to release again.
+		sub.images = nil
+		sub.publishImages()
 	}
 
 	c.reapLingering(1<<62 - 1) // nothing lingers past Close
