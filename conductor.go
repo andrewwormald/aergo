@@ -610,6 +610,20 @@ func (c *Conductor) lingerLog(lb *LogBuffers) {
 	c.logsMu.Unlock()
 }
 
+// abandonAdd drops the state of an add that failed (timed out, or rejected),
+// so a reply that arrives later is not adopted, and releases whatever a reply
+// that raced the failure brought with it.
+func (c *Conductor) abandonAdd(corrID int64) {
+	c.mu.Lock()
+	pub := c.publications[corrID]
+	delete(c.publications, corrID)
+	c.mu.Unlock()
+	if pub != nil && pub.logBuffers != nil && pub.logReleased.CompareAndSwap(false, true) {
+		c.releaseLog(pub.logBuffers)
+	}
+	c.releaseSubscription(corrID)
+}
+
 // forgetPublication drops the state of a closed publication. Without this the
 // map grows by one entry for every publication ever added.
 func (c *Conductor) forgetPublication(st *publicationState) {

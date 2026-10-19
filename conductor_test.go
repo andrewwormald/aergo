@@ -951,3 +951,37 @@ func TestAddAfterCloseFails(t *testing.T) {
 		t.Error("AddSubscription on a closed client wrote to the driver")
 	}
 }
+
+// An add that fails (timed out, or rejected by the driver) leaves no pending
+// state behind, and a reply that arrives after it gave up maps nothing.
+func TestFailedAddLeavesNoState(t *testing.T) {
+	defer PublicationWaitTimeoutForTesting(PublicationWaitTimeoutForTesting(50 * time.Millisecond))
+	c, bcast := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	a := &Aeron{conductor: c}
+
+	corrID := toDriver.NextCorrelationID() + 1
+	if _, err := a.AddPublication("aeron:ipc", 1); err == nil {
+		t.Fatal("AddPublication with no driver reply succeeded")
+	}
+	if len(c.publications) != 0 {
+		t.Errorf("%d publication states left by a timed-out add", len(c.publications))
+	}
+	c.onNewPublication(publicationReply(corrID, writeLogFile(t, 64*1024)))
+	if len(c.logs) != 0 || len(c.publications) != 0 {
+		t.Errorf("late reply kept %d logs and %d publication states", len(c.logs), len(c.publications))
+	}
+
+	corrID = toDriver.NextCorrelationID() + 1
+	reject := binary.LittleEndian.AppendUint64(nil, uint64(corrID))
+	reject = binary.LittleEndian.AppendUint32(reject, 1)
+	reject = binary.LittleEndian.AppendUint32(reject, 0)
+	bcast.transmit(RespOnError, reject)
+	if _, err := a.AddSubscription("aeron:ipc", 1); err == nil {
+		t.Fatal("rejected AddSubscription succeeded")
+	}
+	if len(c.subscriptions) != 0 {
+		t.Errorf("%d subscription states left by a rejected add", len(c.subscriptions))
+	}
+}

@@ -122,6 +122,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -130,6 +131,7 @@ func (c *Aeron) AddPublication(channel string, streamID int32) (*Publication, er
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("publication timeout")
 }
 
@@ -160,6 +162,7 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindPublication(corrID); state != nil {
@@ -168,6 +171,7 @@ func (c *Aeron) AddExclusivePublication(channel string, streamID int32) (*Public
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("exclusive publication timeout")
 }
 
@@ -186,6 +190,7 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 	for time.Now().Before(deadline) {
 		c.conductor.DoWork()
 		if err := c.awaitError(corrID); err != nil {
+			c.conductor.abandonAdd(corrID)
 			return nil, err
 		}
 		if state := c.conductor.FindSubscription(corrID); state != nil {
@@ -194,6 +199,7 @@ func (c *Aeron) AddSubscription(channel string, streamID int32) (*Subscription, 
 		}
 		time.Sleep(time.Millisecond)
 	}
+	c.conductor.abandonAdd(corrID)
 	return nil, fmt.Errorf("subscription timeout")
 }
 
