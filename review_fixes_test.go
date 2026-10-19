@@ -429,8 +429,8 @@ func TestReassembledMessageHeaderDescribesTheWholeMessage(t *testing.T) {
 	var payload string
 	a := NewFragmentAssembler(func(b []byte, h *Header) { got, payload = *h, string(b) })
 	a.OnFragment([]byte("aa"), &Header{SessionID: 4, Flags: FlagBeginFrag, TermOffset: 64, FrameLength: 34, Position: 128})
-	a.OnFragment([]byte("bb"), &Header{SessionID: 4, Flags: 0, TermOffset: 96, FrameLength: 34, Position: 160})
-	a.OnFragment([]byte("c"), &Header{SessionID: 4, Flags: FlagEndFrag, TermOffset: 128, FrameLength: 33, Position: 192, StreamID: 9})
+	a.OnFragment([]byte("bb"), &Header{SessionID: 4, Flags: 0, TermOffset: 128, FrameLength: 34, Position: 192})
+	a.OnFragment([]byte("c"), &Header{SessionID: 4, Flags: FlagEndFrag, TermOffset: 192, FrameLength: 33, Position: 256, StreamID: 9})
 
 	if payload != "aabbc" {
 		t.Fatalf("payload %q", payload)
@@ -444,7 +444,7 @@ func TestReassembledMessageHeaderDescribesTheWholeMessage(t *testing.T) {
 	if got.TermOffset != 64 {
 		t.Errorf("TermOffset = %d, want 64, where the message begins", got.TermOffset)
 	}
-	if got.Position != 192 || got.SessionID != 4 || got.StreamID != 9 {
+	if got.Position != 256 || got.SessionID != 4 || got.StreamID != 9 {
 		t.Errorf("Position/SessionID/StreamID = %d/%d/%d", got.Position, got.SessionID, got.StreamID)
 	}
 }

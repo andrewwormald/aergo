@@ -26,6 +26,7 @@ type messageBuilder struct {
 	buf             []byte
 	active          bool  // a begin fragment has been seen and no end fragment yet
 	beginTermOffset int32 // where the message starts in the term
+	nextTermOffset  int32 // where the next fragment of the message must start
 }
 
 // NewFragmentAssembler wraps a handler with fragment reassembly.
@@ -80,6 +81,7 @@ func (a *FragmentAssembler) OnFragment(buffer []byte, header *Header) {
 		b.buf = append(b.buf[:0], buffer...)
 		b.active = true
 		b.beginTermOffset = header.TermOffset
+		b.nextTermOffset = nextFragmentOffset(header.TermOffset, buffer)
 		return
 	}
 
@@ -87,8 +89,16 @@ func (a *FragmentAssembler) OnFragment(buffer []byte, header *Header) {
 	if b == nil || !b.active {
 		return // no begin fragment seen, discard
 	}
+	if header.TermOffset != b.nextTermOffset {
+		// Not the frame after the last one: frames were missed, or this is
+		// another message (a new image on a reused session ID). Drop both
+		// halves, as Java's FragmentAssembler does.
+		b.active = false
+		return
+	}
 
 	b.buf = append(b.buf, buffer...)
+	b.nextTermOffset = nextFragmentOffset(header.TermOffset, buffer)
 
 	if flags&FlagEndFrag == FlagEndFrag {
 		// Final fragment -- deliver complete message
@@ -102,4 +112,9 @@ func (a *FragmentAssembler) OnFragment(buffer []byte, header *Header) {
 		a.assembled.TermOffset = b.beginTermOffset
 		a.delegate(b.buf, &a.assembled)
 	}
+}
+
+// nextFragmentOffset is where the frame after a fragment at termOffset starts.
+func nextFragmentOffset(termOffset int32, fragment []byte) int32 {
+	return termOffset + align(DataFrameHeaderLen+int32(len(fragment)), FrameAlignment)
 }
