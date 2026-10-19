@@ -118,6 +118,10 @@ type AeronCluster struct {
 	egressWork    int // messages handled by the current poll
 	ingressPubs   []*Publication
 
+	// egressMalformed is set once a malformed egress message is reported, and
+	// cleared by the next good one, so a flood is reported once.
+	egressMalformed bool
+
 	leaderMemberId    int32
 	leadershipTermId  int64
 	clusterSessionId  int64
@@ -574,8 +578,9 @@ func (c *AeronCluster) onClosingMessage(buffer []byte) {
 // egressFits reports whether an egress message holds what its decoder reads:
 // the block its header names, at least minBlockLength (the fixed fields the
 // decoder reads from it), and varFields length-prefixed fields after it. The
-// message comes off the network, so a malformed one is reported and dropped
-// rather than decoded past its end.
+// message comes off the network, so a malformed one is dropped rather than
+// decoded past its end. It is reported only if the message before it was
+// good, so a run of them is reported once.
 func (c *AeronCluster) egressFits(buffer []byte, hdr *MessageHeader, minBlockLength, varFields int) bool {
 	end := HeaderSize + int(hdr.BlockLength)
 	fits := int(hdr.BlockLength) >= minBlockLength && end <= len(buffer)
@@ -586,10 +591,11 @@ func (c *AeronCluster) egressFits(buffer []byte, hdr *MessageHeader, minBlockLen
 			fits = end <= len(buffer)
 		}
 	}
-	if !fits {
+	if !fits && !c.egressMalformed {
 		c.cfg.Listener.OnError(c, fmt.Errorf("%w: egress template %d with block length %d in %d bytes",
 			ErrCorruptFrame, hdr.TemplateId, hdr.BlockLength, len(buffer)))
 	}
+	c.egressMalformed = !fits
 	return fits
 }
 

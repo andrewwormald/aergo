@@ -275,3 +275,24 @@ func TestClusterEgressNewSubscriptionForgetsEndedSessions(t *testing.T) {
 		t.Error("live session 1 on the new subscription was freed for an image of the old one")
 	}
 }
+
+// A flood of malformed messages is reported once, not once per message, and
+// reported again only after a good message has come in between.
+func TestClusterEgressShortFramesReportedOncePerRun(t *testing.T) {
+	l := &errorRecordingListener{}
+	c := &AeronCluster{cfg: ClusterConfig{Listener: l}, state: StateConnected}
+	short := make([]byte, HeaderSize)
+	(&MessageHeader{BlockLength: 0xFFFF, TemplateId: TemplateIdSessionEvent}).Encode(short, 0)
+
+	for i := 0; i < 100; i++ {
+		c.dispatchEgress(short, &Header{})
+	}
+	if len(l.errs) != 1 {
+		t.Fatalf("100 malformed messages reported %d times, want once", len(l.errs))
+	}
+	c.dispatchEgress(egressMessage(1, []byte("ok")), &Header{})
+	c.dispatchEgress(short, &Header{})
+	if len(l.errs) != 2 {
+		t.Errorf("malformed message after a good one: %d reports, want 2", len(l.errs))
+	}
+}
