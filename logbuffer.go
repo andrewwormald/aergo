@@ -298,29 +298,19 @@ type DataFrameHeader struct {
 
 // ReadTerm reads messages from a term buffer starting at the given offset.
 // Returns (fragmentsRead, newOffset).
+//
+// It stops at a committed frame length no frame can have (shorter than a
+// frame header, or past the end of the term), as Subscription.Poll does, and
+// returns the offset of that frame.
 func ReadTerm(
 	term *AtomicBuffer,
 	termOffset int32,
 	handler TermFragmentHandler,
 	fragmentLimit int,
 ) (int, int32) {
-	// Its address is passed to the handler, so it escapes. Callers that
-	// poll repeatedly should use readTerm with a header they own, so the
-	// escape costs one allocation per call only here.
+	// Its address is passed to the handler, so it escapes: one allocation
+	// per call.
 	var hdr DataFrameHeader
-	return readTerm(term, termOffset, handler, fragmentLimit, &hdr)
-}
-
-// readTerm is ReadTerm with the scratch header supplied by the caller.
-// The handler may only use hdr for the duration of the call, which is
-// Aeron's contract.
-func readTerm(
-	term *AtomicBuffer,
-	termOffset int32,
-	handler TermFragmentHandler,
-	fragmentLimit int,
-	hdr *DataFrameHeader,
-) (int, int32) {
 	fragmentsRead := 0
 	offset := termOffset
 	capacity := term.Capacity()
@@ -330,12 +320,15 @@ func readTerm(
 		if frameLen <= 0 {
 			break // no more committed frames
 		}
+		if frameLen < DataFrameHeaderLen || int64(offset)+int64(frameLen) > int64(capacity) {
+			break // corrupt length
+		}
 
 		alignedLen := align(frameLen, DataFrameHeaderLen)
 		frameType := term.GetInt16(offset + FrameTypeOffset)
 
 		if frameType != int16(FrameTypePadding) {
-			*hdr = DataFrameHeader{
+			hdr = DataFrameHeader{
 				FrameLength:   frameLen,
 				Version:       term.GetUint8(offset + FrameVersionOffset),
 				Flags:         term.GetUint8(offset + FrameFlagsOffset),
@@ -349,7 +342,7 @@ func readTerm(
 
 			payloadOffset := offset + DataFrameHeaderLen
 			payloadLen := frameLen - DataFrameHeaderLen
-			handler(term, payloadOffset, payloadLen, hdr)
+			handler(term, payloadOffset, payloadLen, &hdr)
 			fragmentsRead++
 		}
 
