@@ -847,3 +847,53 @@ func TestSubscriptionAfterConductorClose(t *testing.T) {
 		t.Errorf("Subscription.Close after Conductor.Close released %d logs again", len(c.lingering))
 	}
 }
+
+// A handler may close the client while a poll is under way (a cluster
+// listener closing the cluster, say). The poll goes on reading the image
+// after the handler returns, so the log must still be mapped.
+func TestConductorCloseFromInsidePollHandler(t *testing.T) {
+	c, sub, _ := newClosableSubscription(t)
+	img := (*sub.state.snapshot.Load())[0]
+	pub := newInMemPublication(img.LogBuffers, 1, 1)
+	pub.logBuffers.Meta().PutInt32Ordered(MetaIsConnectedOff, 1)
+	for i := 0; i < 3; i++ {
+		if r, err := pub.Offer([]byte("message")); err != nil || r <= 0 {
+			t.Fatalf("setup offer %d: %d, %v", i, r, err)
+		}
+	}
+
+	n := sub.Poll(func([]byte, *Header) {
+		if err := c.Close(); err != nil {
+			t.Error(err)
+		}
+	}, 10)
+	if n != 3 {
+		t.Errorf("Poll read %d fragments, want 3", n)
+	}
+}
+
+// Close keeps the logs mapped through the linger, then unmaps them.
+func TestConductorCloseUnmapsLogsAfterLinger(t *testing.T) {
+	defer func(d time.Duration) { closeLinger = d }(closeLinger)
+	closeLinger = 20 * time.Millisecond
+
+	c, _, _ := newClosablePublication(t)
+	mapped := func() int {
+		c.logsMu.Lock()
+		defer c.logsMu.Unlock()
+		return len(c.logs)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if mapped() != 1 {
+		t.Fatal("log unmapped at once by Close")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mapped() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("log still mapped long after the linger")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

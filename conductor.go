@@ -67,6 +67,10 @@ const maxRecordedErrors = 64
 // RESOURCE_LINGER_DURATION_DEFAULT_NS).
 const resourceLingerNs = 3_000_000_000
 
+// closeLinger is how long Close keeps the logs and the CnC file mapped. A
+// variable only so tests need not wait for it.
+var closeLinger = time.Duration(resourceLingerNs)
+
 type lingeringLog struct {
 	lb         *LogBuffers
 	deadlineNs int64
@@ -213,9 +217,13 @@ func NewConductor(cfg Context) (*Conductor, error) {
 // ClientID returns the unique client identifier.
 func (c *Conductor) ClientID() int64 { return c.clientID }
 
-// Close shuts down the conductor and releases resources.
+// Close shuts down the conductor. Publications report Closed and
+// subscriptions find no images from then on. The logs and the CnC file are
+// unmapped in the background after a linger, so Close does not report an
+// unmap error; it returns nil.
 func (c *Conductor) Close() error {
-	// Wait for a DoWork in progress: it reads the mapped CnC file closed below.
+	// Wait for a DoWork in progress: it reads the CnC file and the state
+	// released below.
 	c.workMu.Lock()
 	defer c.workMu.Unlock()
 	if c.closed.Load() {
@@ -228,15 +236,16 @@ func (c *Conductor) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var logs []*LogBuffers
 	for _, pub := range c.publications {
 		if pub.logBuffers != nil && pub.logReleased.CompareAndSwap(false, true) {
-			c.releaseLog(pub.logBuffers)
+			logs = append(logs, pub.logBuffers)
 		}
 	}
 	for _, sub := range c.subscriptions {
 		for _, img := range sub.images {
 			if img.LogBuffers != nil {
-				c.releaseLog(img.LogBuffers)
+				logs = append(logs, img.LogBuffers)
 			}
 		}
 		// Polls from now on find no image, and a later Subscription.Close
@@ -244,10 +253,26 @@ func (c *Conductor) Close() error {
 		sub.images = nil
 		sub.publishImages()
 	}
+	c.logsMu.Lock()
+	for _, l := range c.lingering {
+		logs = append(logs, l.lb)
+	}
+	c.lingering = nil
+	c.logsMu.Unlock()
 
-	c.reapLingering(1<<62 - 1) // nothing lingers past Close
-
-	return c.cnc.Close()
+	// Nothing is unmapped yet. Another goroutine may be in an Offer or a Poll
+	// that passed its closed check just before, and a handler may have closed
+	// the client in the middle of a poll that goes on reading the image when
+	// it returns. So the logs and the CnC file linger, as a released log does,
+	// and are unmapped in the background.
+	cnc := c.cnc
+	time.AfterFunc(closeLinger, func() {
+		for _, lb := range logs {
+			c.releaseLog(lb)
+		}
+		_ = cnc.Close()
+	})
+	return nil
 }
 
 // AddPublication requests a new publication from the media driver.
