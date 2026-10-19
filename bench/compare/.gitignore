@@ -1,2 +1,2 @@
-bench/compare/.cache/
-bench/compare/results*.txt
+.cache/
+results*.txt
