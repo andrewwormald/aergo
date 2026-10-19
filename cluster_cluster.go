@@ -455,7 +455,7 @@ func (c *AeronCluster) onConnectReplyMessage(buffer []byte) {
 	var hdr MessageHeader
 	hdr.Decode(buffer, 0)
 
-	if hdr.TemplateId == TemplateIdSessionEvent {
+	if hdr.TemplateId == TemplateIdSessionEvent && c.egressFits(buffer, &hdr, sessionEventBlockLength, 1) {
 		var evt SessionEvent
 		evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
 		if evt.CorrelationId == c.correlationId {
@@ -499,6 +499,9 @@ func (c *AeronCluster) onConnectedMessage(buffer []byte) {
 
 	switch hdr.TemplateId {
 	case TemplateIdSessionMessageHeader:
+		if !c.egressFits(buffer, &hdr, sessionMessageHeaderBlockLength, 0) {
+			break
+		}
 		var smh SessionMessageHeader
 		consumed := smh.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 		payloadOffset := bodyOffset + consumed
@@ -506,6 +509,9 @@ func (c *AeronCluster) onConnectedMessage(buffer []byte) {
 		c.cfg.Listener.OnMessage(c, smh.Timestamp, buffer, payloadOffset, payloadLen)
 
 	case TemplateIdSessionEvent:
+		if !c.egressFits(buffer, &hdr, sessionEventBlockLength, 1) {
+			break
+		}
 		var evt SessionEvent
 		evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 		c.cfg.Listener.OnSessionEvent(c, &evt)
@@ -514,6 +520,9 @@ func (c *AeronCluster) onConnectedMessage(buffer []byte) {
 		}
 
 	case TemplateIdNewLeaderEvent:
+		if !c.egressFits(buffer, &hdr, newLeaderEventBlockLength, 1) {
+			break
+		}
 		var evt NewLeaderEvent
 		evt.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 		c.leaderMemberId = evt.LeaderMemberId
@@ -521,6 +530,9 @@ func (c *AeronCluster) onConnectedMessage(buffer []byte) {
 		c.cfg.Listener.OnNewLeader(c, &evt)
 
 	case TemplateIdChallenge:
+		if !c.egressFits(buffer, &hdr, challengeBlockLength, 1) {
+			break
+		}
 		var ch Challenge
 		ch.DecodeWithBlockLength(buffer, bodyOffset, int(hdr.BlockLength))
 		c.handleChallenge(&ch)
@@ -538,7 +550,7 @@ func (c *AeronCluster) onClosingMessage(buffer []byte) {
 	}
 	var hdr MessageHeader
 	hdr.Decode(buffer, 0)
-	if hdr.TemplateId == TemplateIdSessionEvent {
+	if hdr.TemplateId == TemplateIdSessionEvent && c.egressFits(buffer, &hdr, sessionEventBlockLength, 1) {
 		var evt SessionEvent
 		evt.DecodeWithBlockLength(buffer, HeaderSize, int(hdr.BlockLength))
 		if evt.Code == EventCodeClosed {
@@ -546,6 +558,28 @@ func (c *AeronCluster) onClosingMessage(buffer []byte) {
 		}
 	}
 	c.egressWork++
+}
+
+// egressFits reports whether an egress message holds what its decoder reads:
+// the block its header names, at least minBlockLength (the fixed fields the
+// decoder reads from it), and varFields length-prefixed fields after it. The
+// message comes off the network, so a malformed one is reported and dropped
+// rather than decoded past its end.
+func (c *AeronCluster) egressFits(buffer []byte, hdr *MessageHeader, minBlockLength, varFields int) bool {
+	end := HeaderSize + int(hdr.BlockLength)
+	fits := int(hdr.BlockLength) >= minBlockLength && end <= len(buffer)
+	for i := 0; fits && i < varFields; i++ {
+		fits = end+4 <= len(buffer)
+		if fits {
+			end += 4 + int(getUint32(buffer, end))
+			fits = end <= len(buffer)
+		}
+	}
+	if !fits {
+		c.cfg.Listener.OnError(c, fmt.Errorf("%w: egress template %d with block length %d in %d bytes",
+			ErrCorruptFrame, hdr.TemplateId, hdr.BlockLength, len(buffer)))
+	}
+	return fits
 }
 
 func (c *AeronCluster) handleChallenge(ch *Challenge) {

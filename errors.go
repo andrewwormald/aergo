@@ -42,7 +42,8 @@ var ErrMessageTooLong = errors.New("message too long")
 // handler when a subscription finds a frame it cannot read: a length shorter
 // than a frame header or longer than the rest of the term. The subscription
 // stops at that frame instead of skipping it, so nothing is silently lost and
-// the publisher is back pressured.
+// the publisher is back pressured. A cluster egress message too short for what
+// its header says it holds is reported with it too, and dropped.
 var ErrCorruptFrame = errors.New("corrupt frame")
 
 // MessageTooLongError reports a message longer than the publication allows.

@@ -2,6 +2,8 @@ package aergo
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 )
@@ -139,5 +141,61 @@ func TestClusterEgressIdlePollDoesNotAllocate(t *testing.T) {
 	c, _, _ := newEgressTestCluster(StateConnected)
 	if allocs := testing.AllocsPerRun(100, func() { c.pollEgress(StateConnected) }); allocs != 0 {
 		t.Errorf("idle pollEgress allocates %v times per call", allocs)
+	}
+}
+
+type errorRecordingListener struct {
+	recordingListener
+	errs []error
+}
+
+func (r *errorRecordingListener) OnError(_ Cluster, err error) { r.errs = append(r.errs, err) }
+
+// A frame too short for what its header says it holds comes off the network,
+// not from this client, so it must be dropped and reported, not decoded past
+// its end (which panicked) or handed to the listener as garbage.
+func TestClusterEgressShortFrameIsDroppedAndReported(t *testing.T) {
+	frame := func(blockLength, templateID uint16, body ...byte) []byte {
+		buf := make([]byte, HeaderSize, HeaderSize+len(body))
+		(&MessageHeader{BlockLength: blockLength, TemplateId: templateID, SchemaId: SchemaId, Version: SchemaVersion}).Encode(buf, 0)
+		return append(buf, body...)
+	}
+	varLength := func(n uint32) []byte { return binary.LittleEndian.AppendUint32(nil, n) }
+	cases := []struct {
+		name  string
+		stage ClusterState
+		buf   []byte
+	}{
+		{"message header only", StateConnected, frame(0xFFFF, TemplateIdSessionMessageHeader)},
+		{"session event header only", StateConnected, frame(0xFFFF, TemplateIdSessionEvent)},
+		{"new leader header only", StateConnected, frame(0xFFFF, TemplateIdNewLeaderEvent)},
+		{"challenge header only", StateConnected, frame(0xFFFF, TemplateIdChallenge)},
+		{"connect reply header only", StateAwaitConnectReply, frame(0xFFFF, TemplateIdSessionEvent)},
+		{"closing header only", StateClosing, frame(0xFFFF, TemplateIdSessionEvent)},
+		{"message block shorter than its fields", StateConnected, frame(4, TemplateIdSessionMessageHeader, make([]byte, 4)...)},
+		{"session event without its detail length", StateConnected, frame(sessionEventBlockLength, TemplateIdSessionEvent, make([]byte, sessionEventBlockLength)...)},
+		{"session event detail past the end", StateConnected, frame(sessionEventBlockLength, TemplateIdSessionEvent, append(make([]byte, sessionEventBlockLength), varLength(1000)...)...)},
+		{"new leader endpoints past the end", StateConnected, frame(newLeaderEventBlockLength, TemplateIdNewLeaderEvent, append(make([]byte, newLeaderEventBlockLength), varLength(1000)...)...)},
+		{"challenge data past the end", StateConnected, frame(challengeBlockLength, TemplateIdChallenge, append(make([]byte, challengeBlockLength), varLength(1000)...)...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &errorRecordingListener{}
+			c := &AeronCluster{cfg: ClusterConfig{Listener: l}, state: tc.stage, egressStage: tc.stage}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("dispatchEgress panicked: %v", r)
+					}
+				}()
+				c.dispatchEgress(tc.buf, &Header{})
+			}()
+			if len(l.messages) != 0 || len(l.events) != 0 {
+				t.Errorf("listener got %d messages and %d events from a short frame", len(l.messages), len(l.events))
+			}
+			if len(l.errs) != 1 || !errors.Is(l.errs[0], ErrCorruptFrame) {
+				t.Errorf("errors reported = %v, want one matching ErrCorruptFrame", l.errs)
+			}
+		})
 	}
 }
