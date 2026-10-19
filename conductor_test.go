@@ -897,3 +897,57 @@ func TestConductorCloseUnmapsLogsAfterLinger(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// The error handler may close the client, as a cluster listener closing the
+// cluster from OnError does. Errors found inside DoWork used to reach it
+// while DoWork held the lock Close waits for.
+func TestErrorHandlerMayCloseTheClient(t *testing.T) {
+	c, bcast := newInMemConductor(42)
+	var got []error
+	c.errorHandler = func(err error) {
+		got = append(got, err)
+		_ = c.Close()
+	}
+	bcast.transmit(RespOnClientTimeout, binary.LittleEndian.AppendUint64(nil, 42))
+
+	done := make(chan struct{})
+	go func() {
+		c.DoWork()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DoWork deadlocked: the error handler could not close the client")
+	}
+	if len(got) != 1 || !errors.As(got[0], new(*ClientTimeoutError)) {
+		t.Errorf("handler got %v, want one ClientTimeoutError", got)
+	}
+	if !c.closed.Load() {
+		t.Error("client not closed")
+	}
+}
+
+// Adding to a closed client fails at once, without touching the CnC file,
+// which is unmapped once the close linger is over.
+func TestAddAfterCloseFails(t *testing.T) {
+	c, _ := newInMemConductor(42)
+	toDriver := newTestRingBuffer(4096)
+	c.proxy = NewDriverProxy(toDriver, 42)
+	a := &Aeron{conductor: c}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tail := toDriver.TailPosition()
+
+	start := time.Now()
+	if _, err := a.AddSubscription("aeron:ipc", 1); err == nil {
+		t.Error("AddSubscription on a closed client succeeded")
+	}
+	if time.Since(start) > time.Second {
+		t.Errorf("AddSubscription on a closed client took %v", time.Since(start))
+	}
+	if toDriver.TailPosition() != tail {
+		t.Error("AddSubscription on a closed client wrote to the driver")
+	}
+}

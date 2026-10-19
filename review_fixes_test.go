@@ -20,6 +20,16 @@ func writeLogFile(t *testing.T, termLen int) string {
 	return path
 }
 
+// runAfterWork runs the callbacks a driver message handler queued, as DoWork
+// does once it lets go of its lock, for tests that call the handlers directly.
+func runAfterWork(c *Conductor) {
+	callbacks := c.afterWork
+	c.afterWork = nil
+	for _, fn := range callbacks {
+		fn()
+	}
+}
+
 func newBareConductor() *Conductor {
 	return &Conductor{
 		publications:  map[int64]*publicationState{},
@@ -331,6 +341,7 @@ func TestUnavailableImageIsRemovedAndReported(t *testing.T) {
 	lb := state.images[0].LogBuffers
 
 	c.onUnavailableImage(unavailableImageReply(10, id))
+	runAfterWork(c)
 
 	if len(state.images) != 0 || len(*state.snapshot.Load()) != 0 {
 		t.Errorf("image still present after the driver reported it unavailable")
@@ -348,6 +359,7 @@ func TestUnavailableImageIsRemovedAndReported(t *testing.T) {
 
 	// A message for another subscription or image changes nothing.
 	c.onUnavailableImage(unavailableImageReply(10, 999))
+	runAfterWork(c)
 	if len(ended) != 1 {
 		t.Errorf("handler called for an unknown subscription: %v", ended)
 	}
@@ -361,6 +373,7 @@ func TestErrorHandlerReceivesErrorsAndTheRecordedListIsBounded(t *testing.T) {
 	// A log that cannot be mapped used to vanish without a trace.
 	c.subscriptions[3] = &subscriptionState{correlationID: 3, ready: true}
 	c.onAvailableImage(imageReply(3, filepath.Join(t.TempDir(), "missing.logbuffer")))
+	runAfterWork(c)
 	if len(got) != 1 {
 		t.Fatalf("handler got %d errors for an unmappable image log, want 1", len(got))
 	}
@@ -461,6 +474,7 @@ func TestClusterFreesReassemblyStateOfAnEndedEgressSession(t *testing.T) {
 	}
 
 	c.egressSub.conductor.onUnavailableImage(unavailableImageReply(0, c.egressSub.registrationID))
+	runAfterWork(c.egressSub.conductor)
 	c.pollEgress(StateConnected) // frees on the polling goroutine
 
 	if len(c.egressAssembler.builders) != 0 {

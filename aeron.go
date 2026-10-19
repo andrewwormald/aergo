@@ -79,16 +79,26 @@ func Connect(opts ...ContextOption) (*Aeron, error) {
 // conductor (the driver timed out this client) or a stale driver heartbeat
 // means the wait could never succeed.
 func (c *Aeron) preAddCheck() error {
+	if c.conductor.closed.Load() {
+		return errClientClosed
+	}
 	if err := c.conductor.FatalError(); err != nil {
 		return err
 	}
 	return c.conductor.checkDriverLiveness(time.Now().UnixMilli())
 }
 
+// errClientClosed fails an Add* on a client that is closed, or that is closed
+// while the Add* waits (by an error handler, say).
+var errClientClosed = errors.New("aeron client is closed")
+
 // awaitError reports the first error that should abort a pending Add* wait:
-// a driver rejection of the command (RespOnError) or a terminal client
-// error (driver/client timeout).
+// a driver rejection of the command (RespOnError), a terminal client error
+// (driver/client timeout), or the client being closed.
 func (c *Aeron) awaitError(corrID int64) error {
+	if c.conductor.closed.Load() {
+		return errClientClosed
+	}
 	if err := c.conductor.pendingError(corrID); err != nil {
 		return err
 	}

@@ -38,6 +38,12 @@ type Conductor struct {
 	// their log or the CnC file.
 	closed atomic.Bool
 
+	// afterWork holds the user callbacks (the error handler, an unavailable
+	// image handler) that DoWork found reason to call. DoWork runs them once
+	// it has let go of workMu, so a callback may close the client. Only the
+	// goroutine holding workMu touches it.
+	afterWork []func()
+
 	// logs caches the mapped log files by path, with a reference count per
 	// mapping, as Java's LogBuffers factory does. A publication and the image
 	// of a subscription on the same stream (every IPC stream, and any stream
@@ -369,7 +375,19 @@ func (c *Conductor) DoWork() int {
 	if !c.workMu.TryLock() {
 		return 0
 	}
-	defer c.workMu.Unlock()
+	workCount := c.doWork()
+	callbacks := c.afterWork
+	c.afterWork = nil
+	c.workMu.Unlock()
+
+	for _, fn := range callbacks {
+		fn()
+	}
+	return workCount
+}
+
+// doWork is DoWork's work, done holding workMu.
+func (c *Conductor) doWork() int {
 	if c.closed.Load() {
 		return 0
 	}
@@ -459,32 +477,41 @@ func (c *Conductor) addErrorLocked(err error) {
 // reportError records err and passes it to the error handler, if there is one
 // (WithErrorHandler; Java's Aeron.Context.errorHandler). The library never logs
 // by itself. The handler runs on the goroutine that found the error, with no
-// lock held, so it may be slow but must not call back into the same client in
-// a way that waits on that goroutine.
+// lock held, so it may be slow and may close the client. It must not call
+// back into the client in a way that waits on another goroutine.
 func (c *Conductor) reportError(err error) {
-	c.mu.Lock()
-	c.addErrorLocked(err)
-	h := c.errorHandler
-	c.mu.Unlock()
-	if h != nil {
+	if h := c.recordError(err); h != nil {
 		h(err)
 	}
 }
 
+// reportErrorAfterWork is reportError for an error DoWork finds: the handler
+// runs when DoWork has let go of workMu.
+func (c *Conductor) reportErrorAfterWork(err error) {
+	if h := c.recordError(err); h != nil {
+		c.afterWork = append(c.afterWork, func() { h(err) })
+	}
+}
+
+// recordError adds err to the recent errors and returns the error handler.
+func (c *Conductor) recordError(err error) func(error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.addErrorLocked(err)
+	return c.errorHandler
+}
+
 // terminate marks the conductor closed-equivalent with the fatal error that
-// caused it. The first terminal error wins; later calls are no-ops.
+// caused it. The first terminal error wins; later calls are no-ops. It is
+// called only by DoWork, which runs the error handler afterwards.
 func (c *Conductor) terminate(err error) {
 	if !c.terminated.CompareAndSwap(false, true) {
 		return
 	}
 	c.mu.Lock()
 	c.fatalErr = err
-	c.addErrorLocked(err)
-	h := c.errorHandler
 	c.mu.Unlock()
-	if h != nil {
-		h(err)
-	}
+	c.reportErrorAfterWork(err)
 }
 
 // isTerminated reports whether the conductor is closed, or closed-equivalent.
@@ -751,7 +778,7 @@ func (c *Conductor) onAvailableImage(msg []byte) {
 	if err != nil {
 		// Without the log the image cannot be read, and the subscription would
 		// silently never see this publication.
-		c.reportError(fmt.Errorf("map log buffers %s for subscription %d: %w", logFile, subRegID, err))
+		c.reportErrorAfterWork(fmt.Errorf("map log buffers %s for subscription %d: %w", logFile, subRegID, err))
 		return
 	}
 
@@ -835,7 +862,7 @@ func (c *Conductor) onUnavailableImage(msg []byte) {
 	c.mu.Unlock()
 
 	if handler != nil {
-		handler(sessionID)
+		c.afterWork = append(c.afterWork, func() { handler(sessionID) })
 	}
 }
 
@@ -871,10 +898,6 @@ func (c *Conductor) onError(msg []byte) {
 	if sub := c.subscriptions[corrID]; sub != nil {
 		sub.err = err
 	}
-	c.addErrorLocked(err)
-	h := c.errorHandler
 	c.mu.Unlock()
-	if h != nil {
-		h(err)
-	}
+	c.reportErrorAfterWork(err)
 }
