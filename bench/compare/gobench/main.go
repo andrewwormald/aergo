@@ -1,3 +1,5 @@
+//go:build linux
+
 // Go side of the Java vs Go Aeron client comparison. Same methodology as
 // bench/compare/java/Bench.java; keep the two in step.
 //
