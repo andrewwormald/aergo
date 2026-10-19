@@ -136,9 +136,13 @@ type AeronCluster struct {
 
 func NewCluster(cfg ClusterConfig) (*AeronCluster, error) {
 	// Errors the client finds with no caller to return to (a log that cannot be
-	// mapped, a corrupt frame) go to the listener, as the rest of the poll-driven
-	// state machine's do. They arise inside Poll, so the listener is called on
-	// the polling goroutine.
+	// mapped, a corrupt frame, the driver or client timing out) go to the
+	// listener, as the rest of the poll-driven state machine's do. The handler
+	// captures cluster before it is assigned. That is safe because it is called
+	// only from the conductor's DoWork (its terminate and driver-error paths)
+	// and from Subscription.Poll, and the cluster runs both only inside Poll,
+	// on the polling goroutine. Connect runs neither, so cluster is set by the
+	// first call; the nil check is a guard, not a path in use.
 	var cluster *AeronCluster
 	ac, err := Connect(WithDir(cfg.AeronDir), WithErrorHandler(func(err error) {
 		if cluster != nil {
