@@ -92,8 +92,9 @@ func (p *Publication) setLimits() {
 // fragments anything longer.
 func (p *Publication) MaxPayloadLength() int { return int(p.maxPayloadLength) }
 
-// MaxMessageLength is the longest message Offer accepts: an eighth of the
-// term length, at most 16 MiB. Messages longer than MaxPayloadLength are sent
+// MaxMessageLength is the longest fragmented message Offer accepts: an eighth
+// of the term length, at most 16 MiB. Offer accepts any message up to
+// MaxPayloadLength, so the longest it accepts is the larger of the two. Messages longer than MaxPayloadLength are sent
 // as several fragments and must be reassembled by the subscriber (see
 // FragmentAssembler).
 func (p *Publication) MaxMessageLength() int { return int(p.maxMessageLength) }
@@ -101,9 +102,11 @@ func (p *Publication) MaxMessageLength() int { return int(p.maxMessageLength) }
 // Offer sends a message to the publication's stream.
 //
 // A message longer than MaxPayloadLength is split into fragments, each in its
-// own frame, which the subscriber reassembles; one longer than
+// own frame, which the subscriber reassembles; such a message longer than
 // MaxMessageLength is rejected with a *MessageTooLongError (matching
-// ErrMessageTooLong) and nothing is written.
+// ErrMessageTooLong) and nothing is written. As in Java, a message that fits
+// in one frame is always accepted, even when that is longer than
+// MaxMessageLength (a large MTU on a short term).
 //
 // Otherwise the returned int64 is the new stream position on success, or a
 // negative value of NotConnected, BackPressured, AdminAction, Closed, or
