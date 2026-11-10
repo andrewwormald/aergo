@@ -78,8 +78,9 @@ type ArchiveConfig struct {
 	// defaults to 10 seconds.
 	MessageTimeout time.Duration
 
-	// Credentials, when set, are sent with the connect request
-	// (ArchiveAuthConnectRequest) for an archive with authentication enabled.
+	// Credentials, when set, are sent with the connect request for an archive
+	// with authentication enabled. The request is always the auth form; with no
+	// credentials its credentials are empty.
 	Credentials []byte
 
 	// ChallengeResponder answers an authentication challenge. It receives the
@@ -217,32 +218,22 @@ func (a *Archive) connect(ctx context.Context) error {
 		return err
 	}
 
+	// Always the auth form, with empty credentials when there are none, as the
+	// Java client does. Archive 1.53 (schema 14) dropped the plain ConnectRequest
+	// and ignores it without a word, so a client that sends it only times out.
+	// Every archive that has the plain form also has this one.
 	correlationId := a.ac.NextCorrelationId()
-	if len(a.cfg.Credentials) > 0 {
-		req := &ArchiveAuthConnectRequest{
-			CorrelationId:      correlationId,
-			ResponseStreamId:   a.cfg.ControlResponseStreamId,
-			Version:            ArchiveProtocolSemanticVersion,
-			ResponseChannel:    a.cfg.ControlResponseChannel,
-			EncodedCredentials: a.cfg.Credentials,
-		}
-		buf := make([]byte, req.EncodedLength())
-		req.Encode(buf, 0)
-		if err := a.offer(ctx, buf); err != nil {
-			return err
-		}
-	} else {
-		req := &ArchiveConnectRequest{
-			CorrelationId:    correlationId,
-			ResponseStreamId: a.cfg.ControlResponseStreamId,
-			Version:          ArchiveProtocolSemanticVersion,
-			ResponseChannel:  a.cfg.ControlResponseChannel,
-		}
-		buf := make([]byte, req.EncodedLength())
-		req.Encode(buf, 0)
-		if err := a.offer(ctx, buf); err != nil {
-			return err
-		}
+	req := &ArchiveAuthConnectRequest{
+		CorrelationId:      correlationId,
+		ResponseStreamId:   a.cfg.ControlResponseStreamId,
+		Version:            ArchiveProtocolSemanticVersion,
+		ResponseChannel:    a.cfg.ControlResponseChannel,
+		EncodedCredentials: a.cfg.Credentials,
+	}
+	buf := make([]byte, req.EncodedLength())
+	req.Encode(buf, 0)
+	if err := a.offer(ctx, buf); err != nil {
+		return err
 	}
 
 	resp, err := a.awaitConnectResponse(ctx, correlationId)

@@ -178,7 +178,7 @@ func correlationOf(buf []byte) int64 { return getInt64(buf, HeaderSize+0) }
 func TestConnectArchiveSucceeds(t *testing.T) {
 	f := newFakeArchiveAeron()
 	f.pub.onRequest = func(buf []byte) {
-		if templateOf(buf) == TemplateIdArchiveConnectRequest {
+		if templateOf(buf) == TemplateIdArchiveAuthConnectRequest {
 			f.sub.push(encodeArchiveControlResponse(ArchiveControlResponse{
 				ControlSessionId: 77, CorrelationId: getInt64(buf, HeaderSize+0), Code: ArchiveControlResponseOK,
 			}))
@@ -201,9 +201,9 @@ func TestConnectArchiveSucceeds(t *testing.T) {
 		t.Errorf("response channel/stream = %q/%d", f.responseChannel, f.responseStream)
 	}
 
-	// It sent a ConnectRequest telling the archive where to reply.
+	// It sent an AuthConnectRequest, with no credentials, telling the archive where to reply.
 	reqs := f.pub.requests()
-	if len(reqs) != 1 || templateOf(reqs[0]) != TemplateIdArchiveConnectRequest {
+	if len(reqs) != 1 || templateOf(reqs[0]) != TemplateIdArchiveAuthConnectRequest {
 		t.Fatalf("requests = %d, first template %d", len(reqs), templateOf(reqs[0]))
 	}
 	if got := getInt32(reqs[0], HeaderSize+8); got != ArchiveControlResponseStreamIdDefault {
@@ -247,7 +247,7 @@ func TestConnectArchiveAnswersChallenge(t *testing.T) {
 	var challengeCorr int64
 	f.pub.onRequest = func(buf []byte) {
 		switch templateOf(buf) {
-		case TemplateIdArchiveConnectRequest:
+		case TemplateIdArchiveAuthConnectRequest:
 			challengeCorr = correlationOf(buf)
 			f.sub.push(encodeArchiveChallenge(ArchiveChallenge{ControlSessionId: 42, CorrelationId: challengeCorr, EncodedChallenge: []byte("nonce")}))
 		case TemplateIdArchiveChallengeResponse:
@@ -368,7 +368,7 @@ func TestConnectArchiveIgnoresOtherCorrelationIds(t *testing.T) {
 func TestArchiveCloseSendsCloseSessionAndIsIdempotent(t *testing.T) {
 	f := newFakeArchiveAeron()
 	f.pub.onRequest = func(buf []byte) {
-		if templateOf(buf) == TemplateIdArchiveConnectRequest {
+		if templateOf(buf) == TemplateIdArchiveAuthConnectRequest {
 			f.sub.push(encodeArchiveControlResponse(ArchiveControlResponse{ControlSessionId: 77, CorrelationId: correlationOf(buf), Code: ArchiveControlResponseOK}))
 		}
 	}

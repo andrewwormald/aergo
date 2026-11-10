@@ -49,7 +49,7 @@ func newConnectedArchive(t *testing.T) (*Archive, *fakeArchiveAeron) {
 	t.Helper()
 	f := newFakeArchiveAeron()
 	f.pub.onRequest = func(buf []byte) {
-		if templateOf(buf) == TemplateIdArchiveConnectRequest {
+		if templateOf(buf) == TemplateIdArchiveAuthConnectRequest {
 			f.sub.push(encodeArchiveControlResponse(ArchiveControlResponse{ControlSessionId: testControlSessionId, CorrelationId: correlationOf(buf), Code: ArchiveControlResponseOK}))
 		}
 	}
