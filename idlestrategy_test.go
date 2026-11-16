@@ -124,26 +124,6 @@ func TestIdleStrategyImplementations(t *testing.T) {
 	var _ IdleStrategy = NewBackoffIdleStrategy()
 }
 
-func TestBackoffIdleStrategy_WithSleepReplacesTheParkSleep(t *testing.T) {
-	var slept []time.Duration
-	b := NewBackoffIdleStrategyWithConfig(1, 1, 10*time.Microsecond, 40*time.Microsecond).
-		WithSleep(func(d time.Duration) { slept = append(slept, d) })
-
-	for i := 0; i < 2+4; i++ { // a spin, a yield, then four parks
-		b.IdleNoWork()
-	}
-
-	want := []time.Duration{10 * time.Microsecond, 20 * time.Microsecond, 40 * time.Microsecond, 40 * time.Microsecond}
-	if len(slept) != len(want) {
-		t.Fatalf("slept %v, want %v", slept, want)
-	}
-	for i, w := range want {
-		if slept[i] != w {
-			t.Errorf("sleep %d = %v, want %v", i, slept[i], w)
-		}
-	}
-}
-
 func TestYieldingIdleStrategy_NeverSleeps(t *testing.T) {
 	var s IdleStrategy = NewYieldingIdleStrategy()
 	start := time.Now()

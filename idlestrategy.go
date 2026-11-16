@@ -27,7 +27,7 @@ type IdleStrategy interface {
 
 // BackoffIdleStrategy mirrors Agrona's real state machine: SPINNING (pure
 // busy counter, no OS yield) for maxSpins calls -> YIELDING
-// (runtime.Gosched()) for maxYields calls -> PARKING (time.Sleep(parkPeriod),
+// (runtime.Gosched()) for maxYields calls -> PARKING (PreciseSleep(parkPeriod),
 // doubling each call, capped at maxParkPeriod). Any call with workCount > 0
 // via Idle, or an explicit Reset(), zeroes the spin/yield counters and
 // resets parkPeriod back to minParkPeriod.
@@ -40,9 +40,6 @@ type BackoffIdleStrategy struct {
 	spins      int
 	yields     int
 	parkPeriod time.Duration
-
-	// sleep parks for one park period. PreciseSleep by default.
-	sleep func(time.Duration)
 }
 
 var _ IdleStrategy = (*BackoffIdleStrategy)(nil)
@@ -61,26 +58,7 @@ func NewBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark 
 		minParkPeriod: minPark,
 		maxParkPeriod: maxPark,
 		parkPeriod:    minPark,
-		sleep:         PreciseSleep,
 	}
-}
-
-// WithSleep makes the park phase sleep with sleep instead of PreciseSleep, and
-// returns b. A strategy is not safe for concurrent use, so call it before the
-// strategy is used.
-//
-// Pass time.Sleep to park only the goroutine and not the thread. PreciseSleep
-// blocks the thread for the length of each sleep, as Java's parkNanos does, so
-// many goroutines idling at once hold many threads. That is the one reason to
-// choose time.Sleep: its sleeps are far too long for a loop that is waiting for a
-// frame. When no other goroutine is runnable, Go's idle thread waits in
-// epoll_wait, whose timeout is in whole milliseconds, and the runtime rounds any
-// wait shorter than 1ms up to 1ms. On Linux a time.Sleep of 64µs takes about
-// 1.2ms, so a frame that arrives while the loop is parked waits that long to be
-// seen.
-func (b *BackoffIdleStrategy) WithSleep(sleep func(time.Duration)) *BackoffIdleStrategy {
-	b.sleep = sleep
-	return b
 }
 
 // Idle is called once per work-cycle with the amount of work done that
@@ -107,7 +85,7 @@ func (b *BackoffIdleStrategy) IdleNoWork() {
 		runtime.Gosched()
 		return
 	}
-	b.sleep(b.parkPeriod)
+	PreciseSleep(b.parkPeriod)
 	b.parkPeriod *= 2
 	if b.parkPeriod > b.maxParkPeriod {
 		b.parkPeriod = b.maxParkPeriod
