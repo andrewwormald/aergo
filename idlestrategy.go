@@ -65,6 +65,20 @@ func NewBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark 
 	}
 }
 
+// NewPreciseBackoffIdleStrategy returns a BackoffIdleStrategy with Agrona's
+// standard defaults (10 spins, 5 yields, park doubling from 1µs to 1ms) whose every
+// park uses PreciseSleep. Use it for the one goroutine that polls for frames; see
+// WithSleep for why, and for what it costs.
+func NewPreciseBackoffIdleStrategy() *BackoffIdleStrategy {
+	return NewBackoffIdleStrategy().WithSleep(PreciseSleep)
+}
+
+// NewPreciseBackoffIdleStrategyWithConfig is NewPreciseBackoffIdleStrategy with
+// all four parameters set.
+func NewPreciseBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark time.Duration) *BackoffIdleStrategy {
+	return NewBackoffIdleStrategyWithConfig(maxSpins, maxYields, minPark, maxPark).WithSleep(PreciseSleep)
+}
+
 // WithSleep makes the park phase sleep with sleep instead of time.Sleep, and
 // returns b. A strategy is not safe for concurrent use, so call it before the
 // strategy is used.
