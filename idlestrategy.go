@@ -40,6 +40,9 @@ type BackoffIdleStrategy struct {
 	spins      int
 	yields     int
 	parkPeriod time.Duration
+
+	// sleep parks the goroutine for one park period. time.Sleep by default.
+	sleep func(time.Duration)
 }
 
 var _ IdleStrategy = (*BackoffIdleStrategy)(nil)
@@ -58,7 +61,23 @@ func NewBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark 
 		minParkPeriod: minPark,
 		maxParkPeriod: maxPark,
 		parkPeriod:    minPark,
+		sleep:         time.Sleep,
 	}
+}
+
+// WithSleep makes the park phase sleep with sleep instead of time.Sleep, and
+// returns b. A strategy is not safe for concurrent use, so call it before the
+// strategy is used.
+//
+// time.Sleep is the wrong sleep for a loop that is waiting for a frame. When no
+// other goroutine is runnable, Go's idle thread waits in epoll_wait, whose
+// timeout is in whole milliseconds, and the runtime rounds any wait shorter than
+// 1ms up to 1ms. On Linux a time.Sleep of 64µs takes about 1.2ms, so a frame that
+// arrives while the loop is parked waits that long to be seen. PreciseSleep does
+// not have that floor.
+func (b *BackoffIdleStrategy) WithSleep(sleep func(time.Duration)) *BackoffIdleStrategy {
+	b.sleep = sleep
+	return b
 }
 
 // Idle is called once per work-cycle with the amount of work done that
@@ -85,7 +104,7 @@ func (b *BackoffIdleStrategy) IdleNoWork() {
 		runtime.Gosched()
 		return
 	}
-	time.Sleep(b.parkPeriod)
+	b.sleep(b.parkPeriod)
 	b.parkPeriod *= 2
 	if b.parkPeriod > b.maxParkPeriod {
 		b.parkPeriod = b.maxParkPeriod
@@ -99,6 +118,29 @@ func (b *BackoffIdleStrategy) Reset() {
 	b.yields = 0
 	b.parkPeriod = b.minParkPeriod
 }
+
+// YieldingIdleStrategy yields the thread to the scheduler on every empty poll,
+// and never sleeps. A frame waits only for one trip round the scheduler, and one
+// core stays busy. It is Agrona's YieldingIdleStrategy.
+type YieldingIdleStrategy struct{}
+
+var _ IdleStrategy = YieldingIdleStrategy{}
+
+// NewYieldingIdleStrategy returns a YieldingIdleStrategy.
+func NewYieldingIdleStrategy() YieldingIdleStrategy { return YieldingIdleStrategy{} }
+
+// Idle yields when workCount is 0, and does nothing otherwise.
+func (YieldingIdleStrategy) Idle(workCount int) {
+	if workCount == 0 {
+		runtime.Gosched()
+	}
+}
+
+// IdleNoWork yields.
+func (YieldingIdleStrategy) IdleNoWork() { runtime.Gosched() }
+
+// Reset is a no-op: there is no state.
+func (YieldingIdleStrategy) Reset() {}
 
 // NoOpIdleStrategy never idles — a pure busy-spin. Equivalent to today's
 // OfferWithRetry behavior, given a name so callers can swap strategies
