@@ -157,15 +157,3 @@ func TestYieldingIdleStrategy_NeverSleeps(t *testing.T) {
 		t.Errorf("1000 rounds took %v, so it slept", d)
 	}
 }
-
-func TestNewPreciseBackoffIdleStrategy_TakesTheStandardDefaultsAndTheGivenParameters(t *testing.T) {
-	b := NewPreciseBackoffIdleStrategy()
-	if b.maxSpins != 10 || b.maxYields != 5 || b.minParkPeriod != time.Microsecond || b.maxParkPeriod != time.Millisecond {
-		t.Errorf("parameters = %d, %d, %v, %v, want Agrona's defaults", b.maxSpins, b.maxYields, b.minParkPeriod, b.maxParkPeriod)
-	}
-
-	c := NewPreciseBackoffIdleStrategyWithConfig(1, 2, 3*time.Microsecond, 4*time.Microsecond)
-	if c.maxSpins != 1 || c.maxYields != 2 || c.minParkPeriod != 3*time.Microsecond || c.maxParkPeriod != 4*time.Microsecond {
-		t.Errorf("configured parameters = %d, %d, %v, %v", c.maxSpins, c.maxYields, c.minParkPeriod, c.maxParkPeriod)
-	}
-}

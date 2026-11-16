@@ -11,9 +11,8 @@ import (
 // 700µs, against 1.2ms for both with time.Sleep.
 //
 // It blocks the operating system thread for the length of the sleep, where
-// time.Sleep parks only the goroutine, so use it for the one goroutine that polls
-// for frames, and not for many goroutines at once. It is Java's
-// LockSupport.parkNanos.
+// time.Sleep parks only the goroutine, so many goroutines sleeping at once hold
+// many threads. It is Java's LockSupport.parkNanos.
 func PreciseSleep(d time.Duration) {
 	if d <= 0 {
 		return

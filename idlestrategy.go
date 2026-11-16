@@ -41,7 +41,7 @@ type BackoffIdleStrategy struct {
 	yields     int
 	parkPeriod time.Duration
 
-	// sleep parks the goroutine for one park period. time.Sleep by default.
+	// sleep parks for one park period. PreciseSleep by default.
 	sleep func(time.Duration)
 }
 
@@ -61,34 +61,23 @@ func NewBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark 
 		minParkPeriod: minPark,
 		maxParkPeriod: maxPark,
 		parkPeriod:    minPark,
-		sleep:         time.Sleep,
+		sleep:         PreciseSleep,
 	}
 }
 
-// NewPreciseBackoffIdleStrategy returns a BackoffIdleStrategy with Agrona's
-// standard defaults (10 spins, 5 yields, park doubling from 1µs to 1ms) whose every
-// park uses PreciseSleep. Use it for the one goroutine that polls for frames; see
-// WithSleep for why, and for what it costs.
-func NewPreciseBackoffIdleStrategy() *BackoffIdleStrategy {
-	return NewBackoffIdleStrategy().WithSleep(PreciseSleep)
-}
-
-// NewPreciseBackoffIdleStrategyWithConfig is NewPreciseBackoffIdleStrategy with
-// all four parameters set.
-func NewPreciseBackoffIdleStrategyWithConfig(maxSpins, maxYields int, minPark, maxPark time.Duration) *BackoffIdleStrategy {
-	return NewBackoffIdleStrategyWithConfig(maxSpins, maxYields, minPark, maxPark).WithSleep(PreciseSleep)
-}
-
-// WithSleep makes the park phase sleep with sleep instead of time.Sleep, and
+// WithSleep makes the park phase sleep with sleep instead of PreciseSleep, and
 // returns b. A strategy is not safe for concurrent use, so call it before the
 // strategy is used.
 //
-// time.Sleep is the wrong sleep for a loop that is waiting for a frame. When no
-// other goroutine is runnable, Go's idle thread waits in epoll_wait, whose
-// timeout is in whole milliseconds, and the runtime rounds any wait shorter than
-// 1ms up to 1ms. On Linux a time.Sleep of 64µs takes about 1.2ms, so a frame that
-// arrives while the loop is parked waits that long to be seen. PreciseSleep does
-// not have that floor.
+// Pass time.Sleep to park only the goroutine and not the thread. PreciseSleep
+// blocks the thread for the length of each sleep, as Java's parkNanos does, so
+// many goroutines idling at once hold many threads. That is the one reason to
+// choose time.Sleep: its sleeps are far too long for a loop that is waiting for a
+// frame. When no other goroutine is runnable, Go's idle thread waits in
+// epoll_wait, whose timeout is in whole milliseconds, and the runtime rounds any
+// wait shorter than 1ms up to 1ms. On Linux a time.Sleep of 64µs takes about
+// 1.2ms, so a frame that arrives while the loop is parked waits that long to be
+// seen.
 func (b *BackoffIdleStrategy) WithSleep(sleep func(time.Duration)) *BackoffIdleStrategy {
 	b.sleep = sleep
 	return b
