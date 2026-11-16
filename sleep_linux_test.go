@@ -36,23 +36,3 @@ func TestPreciseSleep_NonPositiveReturnsAtOnce(t *testing.T) {
 		t.Errorf("took %v", d)
 	}
 }
-
-func TestBackoffIdleStrategy_ParksWithoutTheMillisecondFloorByDefault(t *testing.T) {
-	const park = 64 * time.Microsecond
-	b := NewBackoffIdleStrategyWithConfig(1, 1, park, park)
-	b.IdleNoWork() // the spin
-	b.IdleNoWork() // the yield
-
-	took := make([]time.Duration, 100)
-	for i := range took {
-		start := time.Now()
-		b.IdleNoWork() // a park
-		took[i] = time.Since(start)
-	}
-	sort.Slice(took, func(i, j int) bool { return took[i] < took[j] })
-
-	// With time.Sleep the median is about 1.2ms, see the test above.
-	if median := took[len(took)/2]; median > 900*time.Microsecond {
-		t.Errorf("median park of %v for %v asked: the backoff is not using PreciseSleep by default", median, park)
-	}
-}

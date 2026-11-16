@@ -123,17 +123,3 @@ func TestIdleStrategyImplementations(t *testing.T) {
 	var _ IdleStrategy = NoOpIdleStrategy{}
 	var _ IdleStrategy = NewBackoffIdleStrategy()
 }
-
-func TestYieldingIdleStrategy_NeverSleeps(t *testing.T) {
-	var s IdleStrategy = NewYieldingIdleStrategy()
-	start := time.Now()
-	for i := 0; i < 1000; i++ {
-		s.Idle(0)
-		s.IdleNoWork()
-		s.Idle(1)
-		s.Reset()
-	}
-	if d := time.Since(start); d > time.Second {
-		t.Errorf("1000 rounds took %v, so it slept", d)
-	}
-}

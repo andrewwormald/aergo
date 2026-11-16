@@ -27,7 +27,7 @@ type IdleStrategy interface {
 
 // BackoffIdleStrategy mirrors Agrona's real state machine: SPINNING (pure
 // busy counter, no OS yield) for maxSpins calls -> YIELDING
-// (runtime.Gosched()) for maxYields calls -> PARKING (PreciseSleep(parkPeriod),
+// (runtime.Gosched()) for maxYields calls -> PARKING (time.Sleep(parkPeriod),
 // doubling each call, capped at maxParkPeriod). Any call with workCount > 0
 // via Idle, or an explicit Reset(), zeroes the spin/yield counters and
 // resets parkPeriod back to minParkPeriod.
@@ -85,7 +85,7 @@ func (b *BackoffIdleStrategy) IdleNoWork() {
 		runtime.Gosched()
 		return
 	}
-	PreciseSleep(b.parkPeriod)
+	time.Sleep(b.parkPeriod)
 	b.parkPeriod *= 2
 	if b.parkPeriod > b.maxParkPeriod {
 		b.parkPeriod = b.maxParkPeriod
@@ -99,29 +99,6 @@ func (b *BackoffIdleStrategy) Reset() {
 	b.yields = 0
 	b.parkPeriod = b.minParkPeriod
 }
-
-// YieldingIdleStrategy yields the thread to the scheduler on every empty poll,
-// and never sleeps. A frame waits only for one trip round the scheduler, and one
-// core stays busy. It is Agrona's YieldingIdleStrategy.
-type YieldingIdleStrategy struct{}
-
-var _ IdleStrategy = YieldingIdleStrategy{}
-
-// NewYieldingIdleStrategy returns a YieldingIdleStrategy.
-func NewYieldingIdleStrategy() YieldingIdleStrategy { return YieldingIdleStrategy{} }
-
-// Idle yields when workCount is 0, and does nothing otherwise.
-func (YieldingIdleStrategy) Idle(workCount int) {
-	if workCount == 0 {
-		runtime.Gosched()
-	}
-}
-
-// IdleNoWork yields.
-func (YieldingIdleStrategy) IdleNoWork() { runtime.Gosched() }
-
-// Reset is a no-op: there is no state.
-func (YieldingIdleStrategy) Reset() {}
 
 // NoOpIdleStrategy never idles — a pure busy-spin. Equivalent to today's
 // OfferWithRetry behavior, given a name so callers can swap strategies
