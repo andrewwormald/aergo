@@ -987,24 +987,41 @@ func TestFailedAddLeavesNoState(t *testing.T) {
 }
 
 // A caller that spins on DoWork must not pay for a clock read on every call,
-// but the keepalive must still go out once its interval has passed.
-func TestDoWorkReadsClockOnlyEveryNCalls(t *testing.T) {
+// but a slow caller must not wait clockEveryNCalls calls for its keepalive.
+func TestDoWorkReadsClockOnlyEveryNCallsWhenCallsAreFast(t *testing.T) {
 	c, _ := newInMemConductor(43)
-	c.DoWork() // the first call reads the clock and sends a keepalive
-	first := c.lastKeepaliveNs
-	if first == 0 {
-		t.Fatal("first call did not read the clock")
+	c.keepaliveInterNs = int64(time.Hour) // any call is fast against this
+	c.DoWork()                            // first call reads the clock
+	c.DoWork()                            // second sees the gap was short
+	if c.clockEvery != clockEveryNCalls {
+		t.Fatalf("clockEvery = %d after fast calls, want %d", c.clockEvery, clockEveryNCalls)
 	}
 
-	c.keepaliveInterNs = 0 // every clock read now sends a keepalive
+	last := c.lastClockNs
 	for i := 1; i < clockEveryNCalls; i++ {
 		c.DoWork()
 	}
-	if c.lastKeepaliveNs != first {
+	if c.lastClockNs != last {
 		t.Fatalf("clock read before %d calls had passed", clockEveryNCalls)
 	}
-	c.DoWork() // call number clockEveryNCalls+1 reads it again
-	if c.lastKeepaliveNs == first {
+	c.DoWork()
+	if c.lastClockNs == last {
 		t.Fatal("clock not read after clockEveryNCalls calls")
+	}
+}
+
+func TestDoWorkReadsClockEveryCallWhenCallsAreSlow(t *testing.T) {
+	c, _ := newInMemConductor(44)
+	c.keepaliveInterNs = 1 // any call is slow against this
+	c.DoWork()
+	c.DoWork()
+	if c.clockEvery != 1 {
+		t.Fatalf("clockEvery = %d after slow calls, want 1", c.clockEvery)
+	}
+	last := c.lastClockNs
+	time.Sleep(time.Millisecond)
+	c.DoWork()
+	if c.lastClockNs == last {
+		t.Fatal("a slow caller's call did not read the clock")
 	}
 }
