@@ -985,3 +985,26 @@ func TestFailedAddLeavesNoState(t *testing.T) {
 		t.Errorf("%d subscription states left by a rejected add", len(c.subscriptions))
 	}
 }
+
+// A caller that spins on DoWork must not pay for a clock read on every call,
+// but the keepalive must still go out once its interval has passed.
+func TestDoWorkReadsClockOnlyEveryNCalls(t *testing.T) {
+	c, _ := newInMemConductor(43)
+	c.DoWork() // the first call reads the clock and sends a keepalive
+	first := c.lastKeepaliveNs
+	if first == 0 {
+		t.Fatal("first call did not read the clock")
+	}
+
+	c.keepaliveInterNs = 0 // every clock read now sends a keepalive
+	for i := 1; i < clockEveryNCalls; i++ {
+		c.DoWork()
+	}
+	if c.lastKeepaliveNs != first {
+		t.Fatalf("clock read before %d calls had passed", clockEveryNCalls)
+	}
+	c.DoWork() // call number clockEveryNCalls+1 reads it again
+	if c.lastKeepaliveNs == first {
+		t.Fatal("clock not read after clockEveryNCalls calls")
+	}
+}
