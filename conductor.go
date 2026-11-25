@@ -18,9 +18,13 @@ type Conductor struct {
 	driverTimeoutNs  int64
 	keepaliveInterNs int64
 	lastKeepaliveNs  int64
-	// workCalls counts doWork calls, so the clock is read only on some of
-	// them. Guarded by workMu.
-	workCalls uint32
+	// The clock is read on one doWork call in clockEvery, not on every call.
+	// sinceClock counts the calls since the last read and lastClockNs is when
+	// that was. A zero clockEvery reads the clock on every call. All guarded
+	// by workMu.
+	clockEvery  uint32
+	sinceClock  uint32
+	lastClockNs int64
 
 	heartbeatCounterId int32
 
@@ -389,8 +393,18 @@ func (c *Conductor) DoWork() int {
 	return workCount
 }
 
-// clockEveryNCalls is how many doWork calls pass between reads of the clock.
-const clockEveryNCalls = 64
+// clockEveryNCalls is how many doWork calls pass between reads of the clock
+// when the caller is calling fast.
+//
+// slowCallDivisor decides what fast is. A window of clockEveryNCalls calls
+// should take well under the keepalive interval, or a keepalive could go out
+// late. So when the calls average more than keepaliveInterval / (clockEveryNCalls
+// * slowCallDivisor), the caller is slow and the clock is read on every call
+// until it speeds up. A caller that slows down late is noticed after one window.
+const (
+	clockEveryNCalls = 64
+	slowCallDivisor  = 8
+)
 
 // doWork is DoWork's work, done holding workMu.
 func (c *Conductor) doWork() int {
@@ -403,13 +417,23 @@ func (c *Conductor) doWork() int {
 	// The keepalive interval is hundreds of milliseconds, but a caller that
 	// spins calls doWork millions of times a second, and a clock read costs
 	// more than the rest of the call on a host without a fast clock source.
-	// So the clock is read on one call in clockEveryNCalls.
-	n := c.workCalls
-	c.workCalls++
-	if n%clockEveryNCalls != 0 {
+	// So the clock is read on one call in clockEveryNCalls, and on every call
+	// when the calls are slow.
+	c.sinceClock++
+	if c.sinceClock < c.clockEvery {
 		return workCount
 	}
 	now := time.Now().UnixNano()
+	if c.lastClockNs != 0 {
+		slowCallNs := c.keepaliveInterNs / (clockEveryNCalls * slowCallDivisor)
+		if (now-c.lastClockNs)/int64(c.sinceClock) < slowCallNs {
+			c.clockEvery = clockEveryNCalls
+		} else {
+			c.clockEvery = 1
+		}
+	}
+	c.sinceClock = 0
+	c.lastClockNs = now
 	if now-c.lastKeepaliveNs > c.keepaliveInterNs {
 		// Piggyback the driver-liveness check on the keepalive interval
 		// (mirrors Java ClientConductor.checkLiveness): a stale driver
