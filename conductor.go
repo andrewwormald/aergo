@@ -18,6 +18,9 @@ type Conductor struct {
 	driverTimeoutNs  int64
 	keepaliveInterNs int64
 	lastKeepaliveNs  int64
+	// workCalls counts doWork calls, so the clock is read only on some of
+	// them. Guarded by workMu.
+	workCalls uint32
 
 	heartbeatCounterId int32
 
@@ -386,6 +389,9 @@ func (c *Conductor) DoWork() int {
 	return workCount
 }
 
+// clockEveryNCalls is how many doWork calls pass between reads of the clock.
+const clockEveryNCalls = 64
+
 // doWork is DoWork's work, done holding workMu.
 func (c *Conductor) doWork() int {
 	if c.closed.Load() {
@@ -394,6 +400,15 @@ func (c *Conductor) doWork() int {
 
 	workCount := c.broadcastRecv.Receive(c.onDriverMessage, 10)
 
+	// The keepalive interval is hundreds of milliseconds, but a caller that
+	// spins calls doWork millions of times a second, and a clock read costs
+	// more than the rest of the call on a host without a fast clock source.
+	// So the clock is read on one call in clockEveryNCalls.
+	n := c.workCalls
+	c.workCalls++
+	if n%clockEveryNCalls != 0 {
+		return workCount
+	}
 	now := time.Now().UnixNano()
 	if now-c.lastKeepaliveNs > c.keepaliveInterNs {
 		// Piggyback the driver-liveness check on the keepalive interval
